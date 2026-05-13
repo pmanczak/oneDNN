@@ -31,7 +31,11 @@ jobs:
   check-and-run:
     if: |
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request_review'
+      (
+        github.event_name == 'pull_request_review' &&
+        github.event.pull_request.draft == false &&
+        github.event.review.state == 'approved'
+      )
     runs-on: ubuntu-latest
 
     steps:
