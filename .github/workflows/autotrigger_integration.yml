@@ -9,17 +9,7 @@
 name: "integration trigger"
 
 on:
-  # Experimental
-  #  Tested, works
-  issue_comment:
-
-  # Run when ready for review
-  #  Experimental, currently not working
-  pull_request:
-    types: ready_for_review
-
   # Run once review passed
-  #TODO to be tested
   pull_request_review:
     types:
       - submitted
@@ -41,9 +31,7 @@ jobs:
   check-and-run:
     if: |
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request' ||
-      github.event_name == 'pull_request_review' ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+      github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
@@ -56,8 +44,6 @@ jobs:
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
           elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
             PR_NUMBER="${{ github.event.pull_request.number }}"
-          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
-            PR_NUMBER="${{ github.event.issue.number }}"
           else
             echo "Could not determine PR number"
             exit 1
