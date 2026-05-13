@@ -31,7 +31,7 @@ jobs:
   check-and-run:
     if: |
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request'
+      github.event_name == 'pull_request_review'
     runs-on: ubuntu-latest
 
     steps:
@@ -45,7 +45,7 @@ jobs:
           elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
             PR_NUMBER="${{ github.event.pull_request.number }}"
           else
-            echo "Could not determine PR number"
+            echo "Could not determine PR number; Trigger: ${{ github.event_name }}"
             exit 1
           fi
 
