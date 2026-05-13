@@ -5,8 +5,12 @@
 #  - must be approved by reviewers
 #  - must not have a history of manual or automatic triggers (does not re-trigger)
 #
+# TODO:
+#  - verify trigger conditions
+#     = re-runs might be useful in some cases; eg. files modified after last run
+#     = keep source path filtering AND/OR replace with checking labels AND/OR trigger for all PRs?
 
-name: "integration trigger"
+name: "OV integration trigger"
 
 on:
   # Run once review passed
@@ -99,9 +103,7 @@ jobs:
           steps.check_phrase.outputs.skip == 'false' &&
           (
             github.event_name == 'workflow_dispatch' ||
-            github.event_name == 'issue_comment' ||
-            github.event.review.state == 'approved' ||
-            github.event.review.state == 'commented'
+            github.event.review.state == 'approved'
           )
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
