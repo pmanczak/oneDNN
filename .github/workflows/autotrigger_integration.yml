@@ -1,0 +1,121 @@
+#
+# Adds comments that trigger oneDNN - OpenVINO integration tests
+# For this action to be triggered, the PR:
+#  - needs to modify relevant files (GPU)
+#  - must be approved by reviewers
+#  - must not have a history of manual or automatic triggers (does not re-trigger)
+#
+
+name: "integration trigger"
+
+on:
+  # Experimental
+  #  Tested, works
+  issue_comment:
+
+  # Run when ready for review
+  #  Experimental, currently not working
+  pull_request:
+    types: ready_for_review
+
+  # Run once review passed
+  #TODO to be tested
+  pull_request_review:
+    types:
+      - submitted
+
+  # Manual run on specified PR
+  #  probably only useful for testing
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Run OV integration build on this PR'
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+  issues: write
+
+jobs:
+  check-and-run:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'pull_request_review' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ github.event.inputs.pr_number }}" ]; then
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            PR_NUMBER="${{ github.event.issue.number }}"
+          else
+            echo "Could not determine PR number"
+            exit 1
+          fi
+
+          PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName,headRefOid,number)
+
+          echo "base=$(echo "$PR_DATA" | jq -r .baseRefName)" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=$(echo "$PR_DATA" | jq -r .headRefOid)" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(echo "$PR_DATA" | jq -r .number)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.context.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - name: Check modified files
+        id: file_filter
+        uses: dorny/paths-filter@v3
+        with:
+          token: ${{ github.token }}
+          pr-number: ${{ steps.context.outputs.pr_number }}
+          filters: |
+            relevant_files:
+              - 'src/gpu/**'
+
+      - name: Check if relevant tests were already triggered
+        if: steps.file_filter.outputs.relevant_files == 'true'
+        id: check_phrase
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+          TRIGGER_PHRASE: "make test_ov"
+        run: |
+          COMMENTS=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments --template '{{range .comments}}{{.body}}{{"\n"}}{{end}}')
+
+          if echo "$COMMENTS" | grep -Fqw "$TRIGGER_PHRASE"; then
+            echo "Found $TRIGGER_PHRASE comment. No need to re-trigger; STOP."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Did not find the $TRIGGER_PHRASE comment."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Add a comment to trigger integration tests
+        if: |
+          steps.file_filter.outputs.relevant_files == 'true' &&
+          steps.check_phrase.outputs.skip == 'false' &&
+          (
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'issue_comment' ||
+            github.event.review.state == 'approved' ||
+            github.event.review.state == 'commented'
+          )
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIGGER_PHRASE: "make test_ov"
+        run: |
+          echo "PR modifies relevant files, meets trigger conditions, and has no prior OV integration trigger comment."
+          gh pr comment "${{ steps.context.outputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --body "$TRIGGER_PHRASE"
