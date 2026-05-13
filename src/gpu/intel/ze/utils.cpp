@@ -49,7 +49,7 @@ status_t get_ze_device_enabled_systolic_intel(
 }
 
 status_t get_ze_device_enabled_native_float_atomics(
-        ze_device_handle_t device, uint64_t &native_extensions) {
+        ze_device_handle_t device, uint64_t &native_extensions, bool is_xelpg) {
     using namespace gpu::intel::compute;
 
     auto fltAtom = ze_float_atomic_ext_properties_t();
@@ -85,12 +85,15 @@ status_t get_ze_device_enabled_native_float_atomics(
     if ((fltAtom.fp32Flags & atomic_min_max) == atomic_min_max)
         native_extensions |= (uint64_t)native_ext_t::fp32_atomic_min_max;
 
-    if ((fltAtom.fp64Flags & atomic_load_store) == atomic_load_store)
-        native_extensions |= (uint64_t)native_ext_t::fp64_atomic_load_store;
-    if ((fltAtom.fp64Flags & atomic_add) == atomic_add)
-        native_extensions |= (uint64_t)native_ext_t::fp64_atomic_add;
-    if ((fltAtom.fp64Flags & atomic_min_max) == atomic_min_max)
-        native_extensions |= (uint64_t)native_ext_t::fp64_atomic_min_max;
+    // XeLPG lacks native support for f64 atomics.
+    if (!is_xelpg) {
+        if ((fltAtom.fp64Flags & atomic_load_store) == atomic_load_store)
+            native_extensions |= (uint64_t)native_ext_t::fp64_atomic_load_store;
+        if ((fltAtom.fp64Flags & atomic_add) == atomic_add)
+            native_extensions |= (uint64_t)native_ext_t::fp64_atomic_add;
+        if ((fltAtom.fp64Flags & atomic_min_max) == atomic_min_max)
+            native_extensions |= (uint64_t)native_ext_t::fp64_atomic_min_max;
+    }
 
     return status::success;
 }
@@ -161,7 +164,7 @@ status_t init_gpu_hw_info(impl::engine_t *engine, ze_device_handle_t device,
         ze_context_handle_t context, uint32_t &ip_version,
         compute::gpu_arch_t &gpu_arch, compute::gpu_product_t &product_,
         uint64_t &native_extensions, bool &mayiuse_systolic,
-        bool &mayiuse_ngen_kernels) {
+        bool &mayiuse_ngen_kernels, bool &is_efficient_64bit) {
     using namespace ngen;
     ngen::Product product = LevelZeroCodeGenerator<HW::Unknown>::detectHWInfo(
             context, device);
@@ -183,9 +186,14 @@ status_t init_gpu_hw_info(impl::engine_t *engine, ze_device_handle_t device,
         default: break;
     }
 
+    bool is_xelpg = (product.family == ProductFamily::ARL
+            || product.family == ProductFamily::MTL);
     CHECK(get_ze_device_enabled_native_float_atomics(
-            device, native_extensions));
+            device, native_extensions, is_xelpg));
 
+    is_efficient_64bit
+            = LevelZeroCodeGenerator<HW::Unknown>::detectEfficient64Bit(
+                    context, device, getCore(product.family));
     auto status
             = jit::gpu_supports_binary_format(&mayiuse_ngen_kernels, engine);
     if (status != status::success) mayiuse_ngen_kernels = false;
@@ -196,11 +204,17 @@ status_t init_gpu_hw_info(impl::engine_t *engine, ze_device_handle_t device,
     return status::success;
 }
 
+status_t get_binary_size(
+        ze_module_handle_t module_handle, size_t *binary_size) {
+    CHECK(xpu::ze::zeModuleGetNativeBinary(
+            module_handle, binary_size, nullptr));
+    return status::success;
+}
+
 status_t get_module_binary(
         ze_module_handle_t module_handle, xpu::binary_t &binary) {
     size_t module_binary_size;
-    CHECK(xpu::ze::zeModuleGetNativeBinary(
-            module_handle, &module_binary_size, nullptr));
+    CHECK(get_binary_size(module_handle, &module_binary_size));
 
     binary.resize(module_binary_size);
     CHECK(xpu::ze::zeModuleGetNativeBinary(
@@ -251,9 +265,26 @@ status_t create_kernels(ze_device_handle_t device, ze_context_handle_t context,
     for (size_t i = 0; i < kernel_names.size(); i++) {
         if (kernel_names[i] == nullptr) continue;
 
+        std::string kernel_name(kernel_names[i]);
+        if (kernel_name.empty()) {
+            // (copied from OCL backend).
+            // Handle the ngen cases when kernel name is not available.
+            // Query the kernel name from the program. It's expected that
+            // an ngen based program contains only 1 kernel.
+            if (kernel_names.size() != 1 || kernels.size() != 1)
+                return status::invalid_arguments;
+
+            uint32_t count = 1;
+            const char *name = nullptr;
+            CHECK(xpu::ze::zeModuleGetKernelNames(*module_ptr, &count, &name));
+
+            kernel_name = std::string(name);
+            assert(!kernel_name.empty());
+            if (kernel_name.empty()) return status::runtime_error;
+        }
         ze_kernel_desc_t kernel_desc {};
         kernel_desc.stype = ZE_STRUCTURE_TYPE_KERNEL_DESC;
-        kernel_desc.pKernelName = kernel_names[i];
+        kernel_desc.pKernelName = kernel_name.c_str();
 
         ze_kernel_handle_t kernel;
         CHECK(xpu::ze::zeKernelCreate(*module_ptr, &kernel_desc, &kernel));

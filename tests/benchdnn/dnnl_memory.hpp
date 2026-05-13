@@ -21,10 +21,6 @@
 
 #include "oneapi/dnnl/dnnl.h"
 
-#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_DPCPP
-#include "oneapi/dnnl/dnnl_sycl.h"
-#endif
-
 #include "common.hpp"
 #include "utils/dims.hpp"
 #include "utils/wrapper.hpp"
@@ -177,6 +173,10 @@ struct dnn_mem_t {
     void map() const;
     void unmap() const;
     void memset(int value, size_t size, int buffer_index) const;
+#if (DNNL_GPU_RUNTIME != DNNL_RUNTIME_NONE \
+        && DNNL_GPU_VENDOR == DNNL_VENDOR_INTEL)
+    int gpu_fill_random(size_t size, int buffer_index) const;
+#endif
 
     static dnn_mem_t create_from_host_ptr(
             const dnnl_memory_desc_t &md, dnnl_engine_t engine, void *host_ptr);
@@ -210,6 +210,13 @@ struct dnn_mem_t {
     // Initializes memory descriptor for host scalar memory.
     static benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> init_host_scalar_md(
             dnnl_data_type_t data_type);
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+    // Initializes memory descriptor for grouped encoding.
+    static benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> init_grouped_md(
+            int ndims, const dnnl_dims_t dims, dnnl_data_type_t data_type,
+            int variable_dim_idx, dnnl_dim_t group_count,
+            dnnl_data_type_t offsets_dt = dnnl_s32);
+#endif
 
     /* fields */
     dnnl_memory_desc_t md_ {};
@@ -233,6 +240,7 @@ private:
 
     int initialize_memory_create_sycl(const handle_info_t &handle_info);
     int initialize_memory_create_opencl(const handle_info_t &handle_info);
+    int initialize_memory_create_ze(const handle_info_t &handle_info);
     int initialize_memory_create(const handle_info_t &handle_info);
 
     // `prefill` is a flag that controls whether the underlying memory buffer

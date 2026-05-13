@@ -1,7 +1,7 @@
 /*******************************************************************************
 * Copyright 2021 Intel Corporation
 * Copyright 2023-2024 FUJITSU LIMITED
-* Copyright 2024-2025 Arm Ltd. and affiliates
+* Copyright 2024-2026 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 #include "common/dnnl_thread.hpp"
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
+#include "cpu/aarch64/cpu_isa_traits.hpp"
 #include "cpu/aarch64/injectors/jit_uni_postops_injector.hpp"
 
 #include "cpu/binary_injector_utils.hpp"
@@ -221,6 +222,13 @@ status_t brgemm_matmul_conf_utils_t::set_or_check_B_tag(
                     = bgmmc.b_dt_sz * B_d.blocking_desc().strides[dim];
         }
     } else {
+        // Allows tranposed only for sve_256, since it has a copy_b_transpose
+        // implemented, and for gemv cases since they do not use copy_b.
+        // TODO: a working copy_b_transpose for sve_128
+        const bool allow_transposed_b = bgmmc.isa == sve_256
+                || (bgmmc.M == 1
+                        && transposed_tensor_layout_tag == format_tag::ba)
+                || bgmmc.N == 1;
         switch (bgmmc.wei_dt) {
             case f32:
                 // If the B memory descriptor matches both the transposed
@@ -233,15 +241,18 @@ status_t brgemm_matmul_conf_utils_t::set_or_check_B_tag(
                 }
                 if (blocked_B_layouts_allowed) {
                     bgmmc.wei_tag = memory_desc_matches_one_of_tag(B_md,
-                            plain_tensor_layout_tag, blocked_64n_B_layout_tag,
-                            blocked_48n_B_layout_tag, blocked_32n_B_layout_tag,
-                            blocked_16n_B_layout_tag);
+                            plain_tensor_layout_tag,
+                            transposed_tensor_layout_tag,
+                            blocked_64n_B_layout_tag, blocked_48n_B_layout_tag,
+                            blocked_32n_B_layout_tag, blocked_16n_B_layout_tag);
                 } else {
-                    bgmmc.wei_tag = memory_desc_matches_one_of_tag(
-                            B_md, plain_tensor_layout_tag);
-                    if (bgmmc.wei_tag != plain_tensor_layout_tag)
-                        return status::unimplemented;
+                    bgmmc.wei_tag = memory_desc_matches_one_of_tag(B_md,
+                            plain_tensor_layout_tag,
+                            transposed_tensor_layout_tag);
                 }
+                if (!allow_transposed_b
+                        && bgmmc.wei_tag == transposed_tensor_layout_tag)
+                    return status::unimplemented;
                 break;
 
             case bf16:
@@ -814,6 +825,7 @@ status_t compute_blocking_heuristic(brgemm_matmul_conf_t &bgmmc,
         //
         // Batch_Size:
         // - unused.
+        case sme:
         case sve_512:
             best_imbalance = compute_blocking_heuristic_sve_512(
                     bgmmc, bm_conf_utils, matmul, best_blocking);
@@ -845,7 +857,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     const memory_desc_wrapper weights_d(&weights_md);
     const memory_desc_wrapper dst_d(&dst_md);
 
-    bgmmc = zero<decltype(bgmmc)>();
+    bgmmc = utils::zero<decltype(bgmmc)>();
     bgmmc.isa = isa;
     bgmmc.nthr = dnnl_get_max_threads();
     bgmmc.brg_type = brgemm_addr;
@@ -970,7 +982,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     bgmmc.wei_n_blk = get_default_n_block(bgmmc.wei_tag, bgmmc);
 
     bgmmc.blocked_B = bm_conf_utils.get_blocked_B();
-    bgmmc.use_buffer_b = bm_conf_utils.use_buffer_b();
+    bgmmc.use_buffer_b = bm_conf_utils.use_buffer_b() && (sme != isa);
 
     const bool transposed_A = bm_conf_utils.check_is_transposed(bgmmc.src_tag);
     // if M == 1 we can still treat formally transposed A as plain
@@ -981,13 +993,17 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     // For batched problems with plain A and C and fully broadcasted across B
     // we can merge all the batch dimensions into M if broadcast strategies
     // set is limited for binary post-ops
+    //
+    // For 4D tensors with acbd layout, avoid merging batches to prevent stride
+    // issues
     const bool plain_A_layout = bm_conf_utils.check_is_plain(bgmmc.src_tag)
             || treat_transposed_A_as_plain;
     const bool merge_batch_dims_into_M = bgmmc.batch > 1
             && bgmmc.bcast_B_desc.bcast_across_all_batch_dims
             && bm_conf_utils.check_is_plain(bgmmc.dst_tag) && plain_A_layout
             && post_ops_ok(
-                    bgmmc, attr, dst_d, true /* limit_bcast_strategies_set */);
+                    bgmmc, attr, dst_d, true /* limit_bcast_strategies_set */)
+            && !(bgmmc.ndims == 4) && src_d.matches_tag(format_tag::acbd);
     if (merge_batch_dims_into_M) {
         bgmmc.M *= bgmmc.batch;
         bgmmc.batch = 1;
@@ -1035,8 +1051,10 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
 
     // We need to correct A_strides if batched dimensions are merged in M and
     // A layout is formally transposed but could be treated as plain
+    // For 4D tensors, only apply adjustment for treat_A_as_plain, not for acbd tag
+    const bool adjust_for_acbd = src_d.matches_tag(acbd) && bgmmc.ndims == 3;
     if (merge_batch_dims_into_M
-            && (src_d.matches_tag(acbd) || treat_transposed_A_as_plain)) {
+            && (adjust_for_acbd || treat_transposed_A_as_plain)) {
         bgmmc.A_strides[1] = bgmmc.A_strides[2];
     }
 
@@ -1161,11 +1179,18 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
     bgmmc.M_chunk_elems = bgmmc.M_blk * bgmmc.M_chunk_size;
     bgmmc.N_chunk_elems = bgmmc.N_blk * bgmmc.N_chunk_size;
     bgmmc.K_chunk_elems = bgmmc.K_blk * bgmmc.brgemm_batch_size;
-    bgmmc.M_chunks = div_up(bgmmc.M, bgmmc.M_chunk_elems);
-    bgmmc.N_chunks = div_up(bgmmc.N, bgmmc.N_chunk_elems);
-    bgmmc.K_chunks = div_up(bgmmc.K, bgmmc.K_chunk_elems);
-    bgmmc.num_M_blocks = div_up(bgmmc.M, bgmmc.M_blk);
-    bgmmc.num_N_blocks = div_up(bgmmc.N, bgmmc.N_blk);
+    bgmmc.M_chunks = bgmmc.is_runtime_M ? runtime_value_for(bgmmc.M_chunks)
+                                        : div_up(bgmmc.M, bgmmc.M_chunk_elems);
+    bgmmc.N_chunks = bgmmc.is_runtime_N ? runtime_value_for(bgmmc.N_chunks)
+                                        : div_up(bgmmc.N, bgmmc.N_chunk_elems);
+    bgmmc.K_chunks = bgmmc.is_runtime_K ? runtime_value_for(bgmmc.K_chunks)
+                                        : div_up(bgmmc.K, bgmmc.K_chunk_elems);
+    bgmmc.num_M_blocks = bgmmc.is_runtime_M
+            ? runtime_value_for(bgmmc.num_M_blocks)
+            : div_up(bgmmc.M, bgmmc.M_blk);
+    bgmmc.num_N_blocks = bgmmc.is_runtime_N
+            ? runtime_value_for(bgmmc.num_N_blocks)
+            : div_up(bgmmc.N, bgmmc.N_blk);
     const int last_chunck_batch_size
             = (nstl::max(bgmmc.K, bgmmc.K_blk)
                       - (bgmmc.K_chunks - 1) * bgmmc.K_chunk_elems)
@@ -1194,7 +1219,8 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
             = bgmmc.use_buffer_b ? bgmmc.wei_n_blk * bgmmc.N_chunk_size : 0;
     bgmmc.s8s8_comp_b_str = bgmmc.use_buffer_b
             ? 0
-            : div_up(bgmmc.N, bgmmc.wei_n_blk) * bgmmc.wei_n_blk;
+            : (bgmmc.is_runtime_N ? runtime_value_for(bgmmc.s8s8_comp_b_str)
+                                  : rnd_up(bgmmc.N, bgmmc.wei_n_blk));
     bgmmc.s8s8_comp_n_str = bgmmc.wei_n_blk;
 
     bgmmc.A_ptr_shift_b = 0;

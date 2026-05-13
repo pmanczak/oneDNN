@@ -191,9 +191,11 @@ struct GEMMProblem : public CommonProblem {
     bool sumA = false, sumB = false;                // If true, calculate A row sums/B column sums and store in CO.
     bool forceGroupSumsA = false;
     bool forceGroupSumsB = false;
+    bool bdpasEnabled = false;                             // bdpas enabled for problem.
     bool cMXScale = false;
     MatrixAddressing sroundSeed;
     PostOpsProblem postOps;                         // Fused post operations to apply
+    ngen::Product product = {};
 
     // The following data is derived from the postOps and does not need
     //   to be considered for equality/hashing purposes.
@@ -261,11 +263,37 @@ struct GEMMProblem : public CommonProblem {
     bool quantized2DA() const { return forceGroupSumsB || aOffset2D() || aScale2D(); }
     bool quantized2DB() const { return forceGroupSumsA || bOffset2D() || bScale2D(); }
 
-    bool earlyDequantizeA() const { return (aOffset == ABOffset::Calc && earlyDequantizableOffset(Ta_ext, Tao, Ta)) || (aScale2D() && (Ta_scale.isSubsetOf(Ta) || Ta.isFP())); }
-    bool earlyDequantizeB() const { return (bOffset == ABOffset::Calc && earlyDequantizableOffset(Tb_ext, Tbo, Tb)) || (bScale2D() && (Tb_scale.isSubsetOf(Tb) || Tb.isFP())); }
+    bool earlyDequantizeA() const { return (aOffset == ABOffset::Calc && earlyDequantizableOffset(Ta_ext, Tao, Ta)) || (aScale2D() && (Ta_scale.isSubsetOf(Ta) || (Ta.isFP() && !Ta.isF4() && !Ta.isF8()))); }
+    bool earlyDequantizeB() const { return (bOffset == ABOffset::Calc && earlyDequantizableOffset(Tb_ext, Tbo, Tb)) || (bScale2D() && (Tb_scale.isSubsetOf(Tb) || (Tb.isFP() && !Tb.isF4() && !Tb.isF8()))); }
 
     bool needsASums() const { return sumA || (bOffset == ABOffset::Calc && !earlyDequantizeB() && !quantized2DB()); }
     bool needsBSums() const { return sumB || (aOffset == ABOffset::Calc && !earlyDequantizeA() && !quantized2DA()); }
+
+    bool nativeBDPAS() const {
+        return ((Ta.isF4() || Ta.isF8() || Ta == Type::f16 || Ta == Type::bf16) &&
+                (Tb.isF4() || Tb.isF8() || Tb == Type::f16 || Tb == Type::bf16) && 
+        ngen::getCore(product.family) >= ngen::HW::Xe3p);
+    }
+    bool forceLateQuant(int minOPCount) const {
+        bool fp4_fp8_dpas = ((Ta.isF8() && Tb.isF8()) || (Ta.isF4() && Tb.isF4())) && nativeBDPAS();
+        return fp4_fp8_dpas && ((aScale2D() && !preferBDPAS() && aqGroupK % minOPCount == 0)
+            || (bScale2D() && !preferBDPAS() && bqGroupK % minOPCount == 0));
+    }
+    bool forceUpconvertQuant() const {
+        // Cover cases where scale group < ksys by upconverting, using normal dpas and scale routines.
+        return nativeBDPAS() && Ta.isF4() && Tb.isF4() && ((aScale2D() && !preferBDPAS() && aqGroupK % 64 != 0)
+            || (bScale2D() && !preferBDPAS() && bqGroupK % 64 != 0));
+    }
+    bool preferBDPAS() const {
+        bool useBDPAS = (bdpasEnabled && nativeBDPAS() && (aScale2D() || bScale2D()));
+        if (aScale2D()) useBDPAS &= (Ta_scale == Type::f8_e8m0) && (aqGroupK % 32 == 0);
+        if (bScale2D()) useBDPAS &= (Tb_scale == Type::f8_e8m0) && (bqGroupK % 32 == 0);
+        return useBDPAS;
+    }
+    bool validLateScaleGroups() const {
+        return ((aScale2D() && (aqGroupK <=1 || aqGroupK % 32 == 0))
+            || (bScale2D() && (bqGroupK <=1 || bqGroupK % 32 == 0)));
+    }
 
     bool needsAGroupSums() const { return (bOffset == ABOffset::Calc && quantized2DB() && !earlyDequantizableOffset(Tb_ext, Tbo, Tb)); }
     bool needsBGroupSums() const { return (aOffset == ABOffset::Calc && quantized2DA() && !earlyDequantizableOffset(Ta_ext, Tao, Ta)); }
@@ -285,7 +313,7 @@ struct GEMMProblem : public CommonProblem {
     bool isLegalAAlignment(int align, int unrollM) const { return (A.layout != MatrixLayout::N) || ((unrollM * Ta) % align == 0); }
     bool isLegalBAlignment(int align, int unrollN) const { return (B.layout != MatrixLayout::T) || ((unrollN * Tb) % align == 0); }
 
-    inline void autoTypeConversions(ngen::HW hw, bool systolicAvailable);
+    inline void autoTypeConversions(bool systolicAvailable);
     void transpose();
 
     std::string toString() const;
@@ -308,6 +336,7 @@ struct GEMMProblem : public CommonProblem {
         s.append(AO, BO, CO);
         s.append(A_scale, B_scale, C_scale);
         s.append(checkBeta0);
+        s.append(bdpasEnabled);
         s.append(aOffset, bOffset);
         s.append(aoPtrDims, boPtrDims, coPtrDims);
         s.append(asPtrDims, bsPtrDims, csPtrDims);
@@ -320,15 +349,16 @@ struct GEMMProblem : public CommonProblem {
         s.append(sumA, sumB);
         s.append(sroundSeed);
         s.append(postOps);
+        s.append(product);
     }
 };
 
 
 // Apply automatic internal type conversions to a problem.
-void GEMMProblem::autoTypeConversions(ngen::HW hw, bool systolicAvailable)
+void GEMMProblem::autoTypeConversions(bool systolicAvailable)
 {
     using namespace ngen;
-
+    auto hw = getCore(product.family);
     // Weights decompression
     if ((Ta.isInt8() || Ta.isInt4()) && Tb.isFP() && Tc.isFP()) Ta = Tb;
     if ((Tb.isInt8() || Tb.isInt4()) && Ta.isFP() && Tc.isFP()) Tb = Ta;
@@ -340,11 +370,21 @@ void GEMMProblem::autoTypeConversions(ngen::HW hw, bool systolicAvailable)
 
     if (Ta == Ta_ext.asSigned()) Ta = Ta_ext;
     if (Tb == Tb_ext.asSigned()) Tb = Tb_ext;
-
+    if (hw < HW::Xe3p || !systolicAvailable)
+    {
         if (Ta.isF8()) Ta = Type::f16;
         if (Tb.isF8()) Tb = Type::f16;
-        if (Ta.isF4()) Ta = Type::f16;
-        if (Tb.isF4()) Tb = Type::f16;
+    }
+    if (hw < HW::Xe3p ||  product.family < ProductFamily::CRI || !systolicAvailable || forceUpconvertQuant())
+    {
+        if (product.family == ProductFamily::NVLP && (!forceUpconvertQuant() || validLateScaleGroups())){
+            if (Ta.isF4()) Ta = Type::bf8;
+            if (Tb.isF4()) Tb = Type::bf8;
+        } else {
+            if (Ta.isF4()) Ta = Type::f16;
+            if (Tb.isF4()) Tb = Type::f16;
+        }
+    }
 
     if (!systolicAvailable && Tc == Type::f32) {
         if (Ta == Type::f16) Ta = Type::f32;

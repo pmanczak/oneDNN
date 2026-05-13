@@ -31,6 +31,16 @@ engine_impl_t::engine_impl_t(engine_kind_t kind, ze_driver_handle_t driver,
     , context_(context, /* owner = */ !context) {}
 
 status_t engine_impl_t::init() {
+    // Initialize the context if it wasn't provided by the user.
+    if (!context_) {
+        ze_context_desc_t context_desc = {};
+        context_desc.stype = ZE_STRUCTURE_TYPE_CONTEXT_DESC;
+        context_desc.pNext = nullptr;
+        context_desc.flags = 0;
+
+        CHECK(ze::zeContextCreate(driver_, &context_desc, &context_.unwrap()));
+    }
+
     cl_int err;
     std::vector<cl_device_id> ocl_devices;
     xpu::ocl::get_devices(&ocl_devices, CL_DEVICE_TYPE_GPU);
@@ -86,8 +96,10 @@ status_t engine_impl_t::init() {
 
 status_t engine_impl_t::create_stream_impl(
         impl::stream_impl_t **stream_impl, unsigned flags) const {
-    auto *si = new xpu::ze::stream_impl_t(flags, context_, device_);
+    auto *si = new xpu::ze::stream_impl_t(flags);
     if (!si) return status::out_of_memory;
+
+    CHECK(si->init(context_, device_));
 
     *stream_impl = si;
 

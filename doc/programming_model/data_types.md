@@ -165,7 +165,7 @@ can be found in @ref dev_guide_attributes_rounding_mode.
 ## Hardware Limitations
 
 While all the platforms oneDNN supports have hardware acceleration for
-fp32 arithmetics, that is not the case for other data types. Support
+fp32 arithmetic, that is not the case for other data types. Support
 for low precision data types may not be available for older
 platforms. The next sections explain limitations that exist for low
 precision data types for Intel 64/AMD64 based processors and Intel Graphpics.
@@ -176,20 +176,20 @@ oneDNN performance optimizations for Intel Architecture Processors are
 specialized based on Instruction Set Architecture (ISA). The following
 table indicates data types support for every supported ISA:
 
-| ISA                                                  | f64     | f32     | bf16    | f16     | s8/u8   | f8      | f4_e2m1 | s4/u4   |
-| ---------------------------------------------------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- |
-| Intel SSE4.1                                         |         | `+`     |         |         |         |         |         |         |
-| Intel AVX                                            |         | `+`     |         |         |         |         |         |         |
-| Intel AVX2                                           |         | `+`     |         |         | `+`(1)  |         |         |         |
-| Intel AVX2 with Intel DL Boost (int8)                |         | `+`     |         |         | `+`     |         |         |         |
-| Intel AVX-512                                        |         | `+`     | `.`(2)  |         | `+`(1)  |         |         |         |
-| Intel AVX-512 with Intel DL Boost (int8)             |         | `+`     | `.`(2)  |         | `+`     |         |         |         |
-| Intel AVX-512 with Intel DL Boost (int8, bf16)       |         | `+`     | `+`     |         | `+`     |         |         |         |
-| Intel AVX2 with Intel DL Boost (int8) and NE_CONVERT |         | `+`     | `.`     | `.`     | `+`     |         |         |         |
-| Intel AVX10.1/512 with Intel AMX (int8, bf16)        |         | `+`     | `+`     | `.`(3)  | `+`     |         |         | `.`     |
-| Intel AVX10.1/512 with Intel AMX (int8, bf16, f16)   |         | `+`     | `+`     | `+`     | `+`     | `.`     |         | `.`     |
-| Intel AVX10.2                                        |         | `+`     | `+`     | `+`     | `+`     | `.`     |         | `.`     |
-| Intel AVX10.2 with Intel AMX (int8, bf16, fp16, fp8) |         | `+`     | `+`     | `+`     | `+`     | `+`     |         | `.`     |
+| ISA                                                  | f64     | f32     | bf16    | f16     | s8/u8   | f8_e4m3 | f8_e5m2 | f4_e2m1 | s4/u4   |
+| ---------------------------------------------------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- | 
+| Intel SSE4.1                                         |         | `+`     |         |         |         |         |         |         |         |
+| Intel AVX                                            |         | `+`     |         |         |         |         |         |         |         |
+| Intel AVX2                                           |         | `+`     |         |         | `+`(1)  |         |         |         |         |
+| Intel AVX2 with Intel DL Boost (int8)                |         | `+`     |         |         | `+`     |         |         |         |         |
+| Intel AVX-512                                        |         | `+`     | `.`(2)  |         | `+`(1)  |         |         |         |         |
+| Intel AVX-512 with Intel DL Boost (int8)             |         | `+`     | `.`(2)  |         | `+`     |         |         |         |         |
+| Intel AVX-512 with Intel DL Boost (int8, bf16)       |         | `+`     | `+`     |         | `+`     |         |         |         |         |
+| Intel AVX2 with Intel DL Boost (int8) and NE_CONVERT |         | `+`     | `.`     | `.`     | `+`     |         |         |         |         |
+| Intel AVX10.1 with Intel AMX (int8, bf16)            |         | `+`     | `+`     | `.`(3)  | `+`     |         |         |         | `.`     |
+| Intel AVX10.1 with Intel AMX (int8, bf16, f16)       |         | `+`     | `+`     | `+`     | `+`     | `.`     | `.`     |         | `.`     |
+| Intel AVX10.2                                        |         | `+`     | `+`     | `+`     | `+`     | `.`     |         |         | `.`     |
+| Intel AVX10.2 with Intel AMX (int8, bf16, fp16, fp8) |         | `+`     | `+`     | `+`     | `+`     | `+`     | `+`     |         | `.`     |
 
 Legend:
 * `+` indicates oneDNN uses hardware-native compute support for this data type.
@@ -229,6 +229,12 @@ have specialized optimizations in the library:
    * Intel Arc B-Series Graphics (formerly Battlemage)
  * Xe3-LPG
    * Intel Graphics for Intel Core Ultra Series 3 processors (formerly Panther Lake)
+   * Intel Graphics for future Intel Core Series 3 processors (code name Wildcat Lake)
+   * Intel Graphics for future Intel Core Ultra processors (code name Nova Lake S)
+ * Xe3p-LPG
+   * Intel Graphics for future Intel Core Ultra processors (code name Nova Lake P)
+ * Xe3p-XPC
+   * future discrete GPUs based on Xe3p-XPC architecture (code name Crescent Island)
 
 The following table indicates the data types support for each uArch supported by oneDNN.
 
@@ -241,6 +247,8 @@ The following table indicates the data types support for each uArch supported by
 | Xe2-LPG  | `+`     | `+`     | `+`     | `+`     | `+`     | `.`     | `.`     | `.`     |
 | Xe2-HPG  | `+`     | `+`     | `+`     | `+`     | `+`     | `.`     | `.`     | `.`     |
 | Xe3-LPG  | `+`     | `+`     | `+`     | `+`     | `+`     | `.`     | `.`     | `.`     |
+| Xe3p-LPG | `+`     | `+`     | `+`     | `+`     | `+`     | `+`     | `.`     | `.`     |
+| Xe3p-XPC | `+`     | `+`     | `+`     | `+`     | `+`     | `+`     | `+`     | `.`     |
 
 Legend:
 * `+` indicates oneDNN uses hardware-native compute support for this data type.

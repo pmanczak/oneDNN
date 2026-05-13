@@ -45,6 +45,7 @@ void larger_partition_kernel_t::setup_pipeline_stage1(
     BACKEND_DNNL_ADD_PASS(pipeline, fuse_mul_sigmoid_to_swish);
     BACKEND_DNNL_ADD_PASS(pipeline, fuse_to_dnnl_sum);
     BACKEND_DNNL_ADD_PASS(pipeline, fuse_to_shuffle);
+    BACKEND_DNNL_ADD_PASS(pipeline, decompose_softmax_with_stats);
 
     // TODO(xx) The implementation of these two passes relay on a non-fully
     // lowered subgraph. We need to improve them.
@@ -447,7 +448,7 @@ status_t larger_partition_kernel_t::ocl_execute_impl(const stream_t *g_stream,
                 if (!subgraph_->is_constant_[i]) continue;
                 returned_event = subgraph_->execs_[i]->execute_ocl(
                         p_stream, res->get_exec_args()[i], deps);
-                deps = {returned_event};
+                deps.assign(1, returned_event);
             }
 
             c_promise.set_value(c_buffer);
@@ -458,7 +459,7 @@ status_t larger_partition_kernel_t::ocl_execute_impl(const stream_t *g_stream,
         if (subgraph_->is_constant_[i]) continue;
         returned_event = subgraph_->execs_[i]->execute_ocl(
                 p_stream, res->get_exec_args()[i], deps);
-        deps = {returned_event};
+        deps.assign(1, returned_event);
     }
 
     scratchpad.set_deps(returned_event);

@@ -44,18 +44,21 @@ dimension, the following constraint must hold true:
 When executed, the inputs and outputs should be mapped to an execution
 argument index as specified by the following table.
 
-| Primitive input/output           | Execution argument index                                                   |
-|----------------------------------|----------------------------------------------------------------------------|
-| \src                             | #DNNL_ARG_SRC                                                               |
-| \weights                         | #DNNL_ARG_WEIGHTS                                                           |
-| \bias                            | #DNNL_ARG_BIAS                                                              |
-| \dst                             | #DNNL_ARG_DST                                                               |
-| \f$\text{dropout output mask}\f$ | #DNNL_ARG_ATTR_DROPOUT_MASK                                                 |
-| \f$\text{dropout probability}\f$ | #DNNL_ARG_ATTR_DROPOUT_PROBABILITY                                          |
-| \f$\text{dropout rng seed}\f$    | #DNNL_ARG_ATTR_DROPOUT_SEED                                                 |
-| \f$\text{binary post-op}\f$      | #DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| #DNNL_ARG_SRC_1, |
-|                                  | #DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| #DNNL_ARG_SRC_2  |
-| \f$\text{prelu post-op}\f$       | #DNNL_ARG_ATTR_MULTIPLE_POST_OP(prelu_post_op_position) \| #DNNL_ARG_WEIGHTS |
+| Argument                         | Index                                                                      | Type   |
+|----------------------------------|----------------------------------------------------------------------------|--------|
+| \src                             | DNNL_ARG_SRC                                                               | Input  |
+| \weights                         | DNNL_ARG_WEIGHTS                                                           | Input  |
+| \bias                            | DNNL_ARG_BIAS                                                              | Input  |
+| \dst                             | DNNL_ARG_DST                                                               | Output |
+| \f$\text{dropout output mask}\f$ | DNNL_ARG_ATTR_DROPOUT_MASK                                                 | Output |
+| \f$\text{dropout probability}\f$ | DNNL_ARG_ATTR_DROPOUT_PROBABILITY                                          | Input  |
+| \f$\text{dropout rng seed}\f$    | DNNL_ARG_ATTR_DROPOUT_SEED                                                 | Input  |
+| \f$\text{binary post-op}\f$      | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1  | Input  |
+|                                  | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_2  | Input  |
+| \f$\text{prelu post-op}\f$       | DNNL_ARG_ATTR_MULTIPLE_POST_OP(prelu_post_op_position) \| DNNL_ARG_WEIGHTS | Input  |
+| [scratchpad]                     | DNNL_ARG_SCRATCHPAD                                                        | Output |
+
+[scratchpad]: @ref dev_guide_attributes_scratchpad
 
 ## Implementation Details
 
@@ -378,11 +381,19 @@ auto dst_mem = memory(dst_md, engine, {dst_data, offsets.data()});
 
 Setting attributes for grouped GEMM follows the regular matmul attribute API.
 Below are some examples of common use cases for MoE workloads.
+For more details on how to set attributes, refer to the @ref dev_guide_attributes page.
 
 Per-token source scales:
 ~~~cpp
 attr.set_scales_mask(DNNL_ARG_SRC, (1 << 0));  // Varies along M dimension
 // Scale tensor: [total_tokens] - one scale per token
+// Layout: concatenated like source data, uses same offsets
+~~~
+
+K-grouped source scales with group size of 128:
+~~~cpp
+attr.set_scales(DNNL_ARG_SRC, (1 << 0) | (1 << 1), {1, 128}, memory::data_type::f16);
+// Scale tensor: [total_tokens, K/128] - one scale per (token, K-block)
 // Layout: concatenated like source data, uses same offsets
 ~~~
 
@@ -401,18 +412,72 @@ auto bias_md = memory::desc({num_groups, N},
 // Layout: standard ab layout
 ~~~
 
+### Execution Hints
+
+An optional execution-time hint `DNNL_ARG_HINT_MAX_GROUP_SIZE` can be provided to
+communicate the maximum size of the group across the variable dimension for the
+current execution call. Implementations may choose to use this input to tune
+dispatch, and therefore using this hint may provide performance benefits.
+
+If chosen, the hint is passed as a host scalar `s32` memory at execution time:
+~~~cpp
+int32_t max_size = 950; // upper bound on variable dimension across all groups for this call
+auto hint_md = memory::desc::host_scalar(memory::data_type::s32);
+auto hint_mem = memory(hint_md, engine, &max_size);
+
+matmul_prim.execute(stream, {
+    {DNNL_ARG_SRC, src_mem},
+    {DNNL_ARG_WEIGHTS, weights_mem},
+    {DNNL_ARG_DST, dst_mem},
+    {DNNL_ARG_HINT_MAX_GROUP_SIZE, hint_mem}  // optional
+});
+~~~
+
+@warning Providing a value smaller than the actual maximum variable dimension across
+groups for the current call will produce incorrect results. It is the caller's
+responsibility to ensure the hint is a valid upper bound.
+
 ### Implementation Notes
 
 The following are supported:
 - Currently, only single dimension `0` can vary.
 - Source and destination must use identical grouping.
 - Scales attribute for source and weights tensors:
-  - Source Scales: row-wise (per-token, `mask = (1 << 0)`) are applied to all experts equally.
-  - Weight Scales: column-wise (per-expert-per-column, `mask = (1 << 0) | (1 << 2)`)
-    and K-grouped (per-expert-per-K-group-per-column, `mask = (1 << 0) | (1 << 1) | (1 << 2)`)
-    with group specification are supported.
+  - Source Scales: row-wise (`mask = (1 << 0)`) and K-grouped
+    (`mask = (1 << 0) | (1 << 1)`) with group specification are supported.
+    The scale tensor follows the same concatenated layout as src, with total
+    size `[total_tokens, K/gK]`.
+  - Weight Scales: column-wise (`mask = (1 << 0) | (1 << 2)`) and
+    K-grouped (`mask = (1 << 0) | (1 << 1) | (1 << 2)`) with group specification
+    are supported.
+  - Scale data type includes: `f32`, `bf16`, `f16`, `e8m0` for MXFP8 and MXFP4,
+    `f8_e4m3` for NVFP4 block scales.
+- Zero points attribute for source and weights tensors:
+  - The masks must match the scales mask
+  - Source zero points data types include `u8`, `s8`
+  - Weights zero points data types include `u8`, `s8`, `u4`, `s4‘
+- Post-ops: binary post-ops are supported (e.g., binary `mul` with a scalar
+  `f32` tensor can be used to apply a global scale factor, as needed for NVFP4
+  two-level scaling).
 - Bias supports per-expert shape.
 - Supported on CPU and GPU engines.
+
+#### Supported Data Types
+
+The following combinations of data types for source, destination, weights, and bias tensors are supported.
+
+| Source           | Weights            | Destination    | Bias           |
+|:-----------------|:-------------------|:---------------|:---------------|
+| f32, bf16, f16   | f32, bf16, f16     | f32, bf16, f16 | f32, bf16, f16 |
+| f8_e5m2, f8_e4m3 | f8_e5m2, f8_e4m3   | f32, bf16, f16 |                |
+| f4_e2m1          | f4_e2m1            | f32, bf16, f16 |                |
+| f32, bf16, f16   | u8, s8, s4, u4 (1) | f32, bf16, f16 | f32, bf16, f16 |
+| u8, s8           | u8, s8, s4, u4     | f32, bf16, f16 | f32, bf16, f16 |
+
+Footnotes:
+1. Weight-Only Quantization (WOQ): floating-point source with integer weights
+   requires weight scales attribute and `fpmath` mode with `apply_to_int` enabled.
+
 
 ## Examples
 

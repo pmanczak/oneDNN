@@ -110,7 +110,7 @@ public:
     ngen::HW hw() const { return host_->getHardware(); }
 
     void _visit(const alloc_t &obj) override {
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
         bool do_alloc = (obj.kind == alloc_kind_t::grf);
         bool use_bc_alloc = false;
         if (do_alloc) {
@@ -144,7 +144,7 @@ public:
 
     void _visit(const for_t &obj) override {
         host_->comment(obj.line_str());
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
         auto var_op = scope.alloc_reg_data(obj.var.type());
         bool dynamic_loop = !is_const(obj.init) || !is_const(obj.bound);
         auto init_op = evaluate(obj.init, scope);
@@ -186,7 +186,7 @@ public:
 
     void _visit(const func_call_t &obj) override {
         host_->comment(obj.line_str());
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
 
         auto &func = obj.func;
         if (func.is<dpas_t>()) {
@@ -245,7 +245,7 @@ public:
         host_->comment(obj.line_str());
 
         bool has_else = bool(obj.else_body);
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
         auto cond_op = evaluate(obj.cond, scope);
 
         ngen::Label l_else;
@@ -275,7 +275,7 @@ public:
             return;
         }
 
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
         host_->comment(obj.line_str());
         if (is_const(obj.value) || is_shuffle_const(obj.value)
                 || obj.var.type() != obj.value.type()) {
@@ -312,7 +312,7 @@ public:
         scope.clear();
 
         // Claim the let variable allocation.
-        auto var_scope = register_scope();
+        ngen_register_scope_t var_scope(host_->ra());
         if (!var_grf_range.isInvalid()) {
             var_scope.claim(var_grf_range);
         } else if (!var_sub.isInvalid()) {
@@ -325,7 +325,7 @@ public:
 
     void _visit(const store_t &obj) override {
         host_->comment(obj.line_str());
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
         auto buf_op = evaluate(obj.buf, scope);
         auto off = to_cpp<int>(obj.off);
         auto mask_op = evaluate(obj.mask, scope);
@@ -352,7 +352,7 @@ public:
 
     void _visit(const while_t &obj) override {
         host_->comment(obj.line_str());
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
 
         ngen::Label loop_end_label;
         ngen::Label loop_begin_label;
@@ -368,7 +368,8 @@ public:
 
 private:
     bool is_header(const expr_t &buf) const {
-        return buf.as<var_t>().name.find("h_") == 0;
+        auto &name = buf.as<var_t>().name;
+        return name == "h" || name.find("h_") == 0;
     }
 
     // Allocates headers using heuristics to reduce back-to-back header reuse -
@@ -404,23 +405,21 @@ private:
         // registers.
         std::vector<ngen::GRFRange> ranges;
         for (int found = 0; found < 2;) {
-            auto r = scope.try_alloc_range(regs);
+            auto r = scope.register_allocator().try_alloc_range(regs);
             ranges.push_back(r);
             if (!is_used_recently(r)) found++;
         }
         auto range = ranges.back();
-        ranges.pop_back();
         for (auto &r : ranges)
-            scope.safeRelease(r);
+            scope.register_allocator().safeRelease(r);
         // If there no range found, fall back to regular allocation, without
         // any heuristics.
-        if (range.isInvalid()) range = scope.alloc_range(regs);
+        if (range.isInvalid())
+            range = scope.alloc_range(regs);
+        else
+            scope.claim(range);
         record(range);
         return reg_buf_t(scope.hw(), range);
-    }
-
-    ngen_register_scope_t register_scope() {
-        return ngen_register_scope_t(host_->ra());
     }
 
 #if GEMMSTONE_ASSERTIONS
@@ -498,7 +497,7 @@ private:
     void barrier_wait() { host_->barrierwait(); }
 
     void slm_fence(const func_call_attr_t &attr) {
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
         auto tmp = scope.alloc();
         ngen::InstructionModifier mod;
         if (attr) mod = mod | attr.as<instruction_modifier_attr_t>().mod;
@@ -508,7 +507,7 @@ private:
     }
 
     void barrier(const func_call_attr_t &attr) {
-        auto scope = register_scope();
+        ngen_register_scope_t scope(host_->ra());
         auto tmp = scope.alloc();
         ngen::InstructionModifier mod;
         if (attr) mod = mod | attr.as<instruction_modifier_attr_t>().mod;
@@ -606,13 +605,16 @@ private:
         } else {
             dsl_assert(dst.byte_offset() == src0.getByteOffset())
                     << "dst/src0 must be aligned to the same GRF offset.";
-            align_src_dst_offset(host_, scope, mod, dst, src1, src2);
             if (mad_func.dst_type == type_t::f64()
                     && src1.reg_data().getHS() == 0
                     && src1.reg_data().getVS() == 0) {
+                align_src_dst_offset(host_, scope, mod, dst, src1);
+                align_src_dst_offset(host_, scope, mod, dst, src2, true);
                 // Workaround for sporadic f64 mad errors with broadcast src1 on XeHPC.
                 host_->mad(mod, dst, src0, src2, src1);
             } else {
+                align_src_dst_offset(host_, scope, mod, dst, src1, true);
+                align_src_dst_offset(host_, scope, mod, dst, src2);
                 host_->mad(mod, dst, src0, src1, src2);
             }
         }
@@ -821,6 +823,19 @@ private:
     std::vector<int> last_used_header_regs_;
 };
 
+bool is_src1_ok(ngen::HW hw, const ngen_operand_t &dst,
+        const ngen_operand_t &src0, const ngen_operand_t &src1) {
+    if (hw == ngen::HW::Xe3p) {
+        if (!src1.is_reg_data()) return true;
+        auto src1_rd = src1.reg_data();
+        if (src1_rd.isScalar()) return true;
+        auto dst_rd = dst.reg_data();
+        return src1_rd.getType() == dst_rd.getType()
+                && src1_rd.getHS() == dst_rd.getHS();
+    }
+    return true;
+}
+
 // Evaluates expression by emitting instructions with nGEN.
 template <typename ngen_generator_t>
 class expr_evaluator_t : public ir_visitor_t {
@@ -853,6 +868,45 @@ public:
                     host_->sel(dst_operand.mod(), dst_operand.reg_data(),
                             bind.reg_data(), 0);
                 } else {
+                    const auto grf_size = ngen::GRF::bytes(hw());
+                    if (hw() >= ngen::HW::Xe3p && bind.is_reg_buf_data()) {
+                        auto mod = dst_operand.mod();
+                        auto dst = dst_operand.reg_data();
+                        auto src = bind.reg_data();
+                        auto exec_size = mod.getExecSize();
+                        const auto dst_stride = dst.getHS();
+                        const auto dst_byte_offset = dst.getByteOffset();
+                        const auto dst_type_size = dst.getBytes();
+                        const auto dst_bytes = dst_type_size
+                                * ((exec_size - 1) * dst_stride + 1);
+                        const auto dst_end_byte = dst_byte_offset + dst_bytes;
+                        if (dst_end_byte > grf_size) { // Compressed instruction
+                            const auto tail_bytes = grf_size - dst_byte_offset;
+                            // Index where we cross the grf boundary.
+                            const auto cidx = 1
+                                    + (tail_bytes / dst_type_size - 1)
+                                            / dst_stride;
+                            const auto src_width = src.getWidth();
+                            const auto src_hs = src.getHS();
+                            const auto src_vs = src.getVS();
+                            const auto x = cidx % src_width;
+                            const auto y = cidx / src_width;
+                            const auto src_base = src.getBase()
+                                    + (src_hs * x + src_vs * y) / grf_size;
+                            const auto dst_base = dst.getBase();
+                            if (src_base == dst_base) {
+                                auto &ra = scope_.register_allocator();
+                                const auto src_type = src.getType();
+                                const int nregs = div_up(dst_bytes, grf_size);
+                                auto tmp = ra.alloc_range(nregs);
+                                auto t = tmp.sub(hw(), 0, src_type)(dst_stride);
+                                host_->emov(exec_size, t, src);
+                                host_->emov(mod, dst, t);
+                                ra.safeRelease(tmp);
+                                return dst_operand;
+                            }
+                        }
+                    }
                     host_->emov(dst_operand.mod(), dst_operand, bind);
                 }
                 return dst_operand;
@@ -949,7 +1003,7 @@ public:
             default: {
                 // Some cases require pre-allocated register regions with
                 // special strides for a/b.
-                auto scope = ngen_register_scope_t(host_->ra());
+                ngen_register_scope_t scope(host_->ra());
                 auto a_out_op = maybe_alloc_strided_op(obj.type, obj.a, scope);
                 auto b_out_op = maybe_alloc_strided_op(obj.type, obj.b, scope);
                 bool is_mul = obj.op_kind == op_kind_t::_mul;
@@ -1280,7 +1334,8 @@ private:
         auto &dst = _dst;
         auto src0 = _src0;
         auto src1 = _src1;
-        align_src_dst_offset(host_, scope_, mod, dst, src0, src1);
+        align_src_dst_offset(host_, scope_, mod, dst, src0);
+        align_src_dst_offset(host_, scope_, mod, dst, src1, true);
         switch (obj.op_kind) {
             case op_kind_t::_add: host_->eadd(mod, dst, src0, src1); break;
             case op_kind_t::_sub: host_->eadd(mod, dst, src0, -src1); break;
@@ -1554,6 +1609,7 @@ private:
         auto t = tmp.format(0, obj.elems(), 1, w_type);
         reg_buf_data_t t_strided;
         bool align_with_dst = false;
+        if (hw() == ngen::HW::Xe3p) align_with_dst = true;
         if (align_with_dst) {
             int w_stride = dst_stride * (ngen::getBytes(dst.type()) / w_size);
             int tmp_strided_regs
@@ -1652,6 +1708,9 @@ ngen::NEOInterfaceHandler generate_ngen_interface(
     if (setup_flags.has_dpas || options.require_dpas()) interface.requireDPAS();
     if (setup_flags.has_send_atomics) interface.requireGlobalAtomics();
 
+    if (options.hw() == ngen::HW::Xe3p && !options.hw().efficient_64_bit())
+        interface.setEfficient64Bit(false);
+
     for (size_t i = 0; i < kernel_iface.nargs(); i++) {
         auto &name = kernel_iface[i].as<var_t>().name;
         auto &type = kernel_iface[i].type();
@@ -1707,6 +1766,12 @@ ngen::NEOInterfaceHandler generate_ngen_interface(
 #define GEMMSTONE_XE3_ISA(...)
 #endif
 
+#ifdef GEMMSTONE_BUILD_XE3P
+#define GEMMSTONE_XE3P_ISA(...) __VA_ARGS__
+#else
+#define GEMMSTONE_XE3P_ISA(...)
+#endif
+
 #define GPU_HW_CASE_(hw) \
     case ngen::HW::hw: { \
         GPU_HW_CASE(ngen::HW::hw); \
@@ -1721,6 +1786,7 @@ ngen::NEOInterfaceHandler generate_ngen_interface(
         GEMMSTONE_XEHPC_ISA(GPU_HW_CASE_(XeHPC)); \
         GEMMSTONE_XE2_ISA(GPU_HW_CASE_(Xe2)); \
         GEMMSTONE_XE3_ISA(GPU_HW_CASE_(Xe3)); \
+        GEMMSTONE_XE3P_ISA(GPU_HW_CASE_(Xe3p)); \
         default: dsl_assert(false) << "Unexpected GPU architecture"; \
     }
 
@@ -1793,6 +1859,10 @@ GEMMSTONE_XE3_ISA(
         template void ir::convert_ir_to_ngen<sycl_gen_t<ngen::HW::Xe3>>(
                 const stmt_t &body, sycl_gen_t<ngen::HW::Xe3> &host,
                 const walk_order_t *kernel_grid_walk_order));
+GEMMSTONE_XE3P_ISA(
+        template void ir::convert_ir_to_ngen<sycl_gen_t<ngen::HW::Xe3p>>(
+                const stmt_t &body, sycl_gen_t<ngen::HW::Xe3p> &host,
+                const walk_order_t *kernel_grid_walk_order));
 
 ::sycl::kernel make_kernel(
         const kernel_t &ir_kernel, ::sycl::context ctx, ::sycl::device dev) {
@@ -1843,6 +1913,10 @@ GEMMSTONE_XE2_ISA(
 GEMMSTONE_XE3_ISA(
         template void ir::convert_ir_to_ngen<ocl_gen_t<ngen::HW::Xe3>>(
                 const stmt_t &body, ocl_gen_t<ngen::HW::Xe3> &host,
+                const walk_order_t *kernel_grid_walk_order));
+GEMMSTONE_XE3P_ISA(
+        template void ir::convert_ir_to_ngen<ocl_gen_t<ngen::HW::Xe3p>>(
+                const stmt_t &body, ocl_gen_t<ngen::HW::Xe3p> &host,
                 const walk_order_t *kernel_grid_walk_order));
 
 cl_kernel make_kernel(

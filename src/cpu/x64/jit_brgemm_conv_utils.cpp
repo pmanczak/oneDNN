@@ -1248,8 +1248,8 @@ status_t brg_blocking_t::calc_blocks() {
 
     const auto thr_eff_threshold = 0.9f;
     const auto max_ow_block_thr = utils::saturate(1, ow,
-            static_cast<int>(div_up(
-                    mb * ngroups * nb_oc * os, thr_eff_threshold * nthr)));
+            static_cast<int>(ceil(
+                    mb * ngroups * nb_oc * os / (thr_eff_threshold * nthr))));
 
     ow_block = os_block = sp_block = -1;
     brg_blocking_t best_brgb = *this;
@@ -1594,8 +1594,8 @@ void brg_blocking_t::calc_blocks_1x1() {
         os_block = 0;
 
         const auto max_ow_block_thr = utils::saturate(1, ow,
-                static_cast<int>(div_up(
-                        mb * ngroups * nb_oc * os, thr_eff_threshold * nthr)));
+                static_cast<int>(ceil(mb * ngroups * nb_oc * os
+                        / (thr_eff_threshold * nthr))));
         const auto max_ow_block_L2 = max_sp_block_L2;
 
         start_sp_block = utils::saturate(
@@ -1679,9 +1679,10 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     const memory_desc_wrapper dst_d(&dst_md);
     const memory_desc_wrapper bias_d(&bias_md);
 
-    // Big int (> INT_MAX) values are unsupported and jcp fields may overflow
+    // Per-tensor spatial product, weights nelems, and per-dim
+    // strides/paddings/dilations must fit in int.
     // TODO: change data type of jcp fields to size_t
-    VDISPATCH_CONV_IC(!has_large_size(cd, src_d, weights_d, dst_d),
+    VDISPATCH_CONV_IC(!has_large_size_relaxed(cd, src_d, weights_d, dst_d),
             VERBOSE_BAD_PARAM, "large size is not supported");
 
     const bool with_groups = weights_d.ndims() == src_d.ndims() + 1;
@@ -1760,7 +1761,7 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     jcp.is_fp8 = one_of(jcp.src_dt, f8_e5m2, f8_e4m3)
             && one_of(jcp.wei_dt, f8_e5m2, f8_e4m3);
     jcp.is_fp8_convert
-            = jcp.is_fp8 && one_of(isa, avx10_1_512_amx_fp16, avx10_2_512);
+            = jcp.is_fp8 && one_of(isa, avx10_1_512_amx_fp16, avx10_2);
     jcp.is_f32_f16
             = everyone_is(f32, jcp.src_dt, jcp.dst_dt) && jcp.wei_dt == f16;
     jcp.is_f32_bf16
@@ -1778,7 +1779,7 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             && isa == avx512_core_amx;
     jcp.is_tf32 = everyone_is(f32, jcp.src_dt, jcp.wei_dt)
             && one_of(attr.fpmath_.mode_, fpmath_mode::tf32, fpmath_mode::any)
-            && is_superset(isa, avx10_2_512_amx_2);
+            && is_superset(isa, avx10_2_amx_2);
     jcp.wei_plain = everyone_is(true, jcp.wei_dt == data_type::f32,
             is_superset(isa, avx512_core), weights_d.is_plain());
     if (jcp.wei_plain)
@@ -1890,11 +1891,11 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             VERBOSE_ISA_DT_MISMATCH);
     VDISPATCH_CONV_IC(
             IMPLICATION(one_of(jcp.wei_dt, f8_e5m2, f8_e4m3),
-                    mayiuse(avx512_core_amx_fp16) || mayiuse(avx10_2_512)),
+                    mayiuse(avx512_core_amx_fp16) || mayiuse(avx10_2)),
             VERBOSE_ISA_DT_MISMATCH);
-    VDISPATCH_CONV_IC(IMPLICATION(jcp.wei_dt == f8_e5m2,
-                              mayiuse(avx512_core_amx_fp16)
-                                      || mayiuse(avx10_2_512_amx_2)),
+    VDISPATCH_CONV_IC(
+            IMPLICATION(jcp.wei_dt == f8_e5m2,
+                    mayiuse(avx512_core_amx_fp16) || mayiuse(avx10_2_amx_2)),
             VERBOSE_ISA_DT_MISMATCH);
     const bool is_f32
             = utils::everyone_is(f32, jcp.src_dt, jcp.wei_dt, jcp.dst_dt);
@@ -2115,8 +2116,8 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
 
     // TODO: this logic seems not taking dilation into which can avoid pure
     // kernel-in-pad cases.
-    if (!is_amx(isa) && div_up(jcp.l_pad, jcp.stride_w) < jcp.kw
-            && div_up(jcp.r_pad, jcp.stride_w) < jcp.kw) {
+    if (!is_amx(isa) && div_up(nstl::max(0, jcp.l_pad), jcp.stride_w) < jcp.kw
+            && div_up(nstl::max(0, jcp.r_pad), jcp.stride_w) < jcp.kw) {
         try_exec_vpad = true;
     }
 
@@ -2658,7 +2659,7 @@ status_t init_1x1_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
 
     const size_t rtus_buffer_size = jcp.is_reduced_rtus
             ? jcp.rtus_padded_ic_size * jcp.os_block
-            : jcp.LDA * jcp.os;
+            : static_cast<size_t>(jcp.LDA) * jcp.os;
     jcp.inp_buffer_size
             = jcp.is_rtus ? rnd_up(rtus_buffer_size, align_size) : 0;
 
@@ -3144,9 +3145,9 @@ status_t init_conf_bwd_w(jit_brgemm_conv_conf_t &jcp,
             && one_of(diff_weights_d.data_type(), f32, f16, f8_e5m2, f8_e4m3)
             && one_of(diff_dst_d.data_type(), f8_e5m2, f8_e4m3);
 
-    jcp.isa = is_fp8 ? (mayiuse(avx10_2_512_amx_2) ? avx10_2_512_amx_2
-                                                   : avx512_core_amx_fp16)
-                     : (is_f16 ? avx512_core_amx_fp16 : avx512_core_amx);
+    jcp.isa = is_fp8
+            ? (mayiuse(avx10_2_amx_2) ? avx10_2_amx_2 : avx512_core_amx_fp16)
+            : (is_f16 ? avx512_core_amx_fp16 : avx512_core_amx);
 
     // disabling verbose dispatch messages for unsupported isa for better readability
     if (!mayiuse(jcp.isa)) return status::unimplemented;

@@ -22,7 +22,6 @@
 #include <memory>
 
 #include "common/c_types_map.hpp"
-#include "common/gemm_utils.hpp"
 #include "common/utils.hpp"
 #include "gpu/intel/compute/device_info.hpp"
 #include "gpu/intel/compute/kernel.hpp"
@@ -30,6 +29,7 @@
 #include "gpu/intel/gemm/jit/gen_kernel.hpp"
 #include "gpu/intel/gemm/jit/pd.hpp"
 #include "gpu/intel/gemm/primitive.hpp"
+#include "gpu/intel/gemm/utils.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -74,7 +74,7 @@ struct gen_t : public primitive_t {
             const auto d = desc();
 
             CHECK(set_default_formats(false));
-            CHECK(jit::pd_t::init(engine));
+            CHECK(jit::pd_t::init(engine, arch_));
 
             auto m = desc()->m();
             auto n = desc()->n();
@@ -86,9 +86,9 @@ struct gen_t : public primitive_t {
                     || d->transc() == dnnl_trans;
 
             // We cannot swap A/B if we don't have kernels to support the
-            // swapped data type/alignment requirements
-            swap_ab_ &= !(utils::one_of(d->a_type(), f8_e5m2, f8_e4m3)
-                    && d->b_type() == bf16);
+            // swapped data type/alignment requirements. Currently mostly affects
+            // weights-only compression cases, since A/B have different data types
+            swap_ab_ &= !wei_decomp_;
 
             if (swap_ab_) {
                 // Do not use transposed B when it is unnecessary
@@ -195,6 +195,7 @@ struct gen_t : public primitive_t {
             // Check GPU architecture.
             bool arch_ok = utils::one_of(arch_, arch_t::xe_lp, arch_t::xe_hp,
                     arch_t::xe_hpg, arch_t::xe_hpc, arch_t::xe2, arch_t::xe3);
+            arch_ok |= (arch_ >= arch_t::xe3p);
 
             VDISPATCH_GEMM(arch_ok, VERBOSE_UNSUPPORTED_ARCH, "gpu");
             VDISPATCH_GEMM(IMPLICATION(with_binary, arch_ >= arch_t::xe_hp),
@@ -215,7 +216,7 @@ struct gen_t : public primitive_t {
                     || intel_engine->mayiuse(compute::device_ext_t::
                                     intel_subgroup_split_matrix_multiply_accumulate);
 
-            bool is_integrated = intel_engine->device_info()->is_integrated();
+            bool is_integrated = dev_info_->is_integrated();
 
             // Size checks for fused reduction kernels.
             if (with_sum_ab()) {
@@ -259,6 +260,9 @@ struct gen_t : public primitive_t {
             VDISPATCH_GEMM(IMPLICATION(problem.Tc == gemmstone::Type::f64,
                                    !with_eltwise && !with_binary),
                     VERBOSE_UNSUPPORTED_POSTOP);
+
+            if (arch_ >= arch_t::xe3p)
+                kernel_desc_.set_efficient_64b(dev_info_->is_efficient_64bit());
 
             bool print_verbose = get_verbose(verbose_t::debuginfo) >= 5;
             bool kernel_success = false;

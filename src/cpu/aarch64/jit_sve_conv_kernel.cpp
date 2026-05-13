@@ -853,7 +853,7 @@ status_t jit_sve_conv_fwd_kernel_t<isa>::init_conf(jit_conv_conf_t &jcp,
     const bool with_groups = weights_d.ndims() == src_d.ndims() + 1;
     int ndims = src_d.ndims();
 
-    jcp = zero<decltype(jcp)>();
+    jcp = utils::zero<decltype(jcp)>();
     jcp.nthr = jcp.aligned_threads = nthreads;
     jcp.ndims = ndims;
     jcp.prop_kind = cd.prop_kind;
@@ -2085,7 +2085,7 @@ status_t jit_sve_conv_bwd_data_kernel_f32_t<isa>::init_conf(
     const memory_desc_wrapper diff_src_d(&diff_src_md);
     const memory_desc_wrapper weights_d(&weights_md);
     const memory_desc_wrapper diff_dst_d(&diff_dst_md);
-    jcp = zero<decltype(jcp)>();
+    jcp = utils::zero<decltype(jcp)>();
 
     const bool with_groups = weights_d.ndims() == diff_src_d.ndims() + 1;
     int ndims = diff_src_d.ndims();
@@ -3611,8 +3611,9 @@ void jit_sve_conv_bwd_weights_kernel_f32_t<isa>::compute_oh_loop_common() {
         }
     }
 
-    const int oj_end_value = nstl::min(
-            oh, utils::div_up(ihp - b_pad - (kh - 1) * dilate_h, stride_h));
+    const int oj_end_value = nstl::min(oh,
+            utils::div_up(
+                    nstl::max(0, ihp - b_pad - (kh - 1) * dilate_h), stride_h));
     cmp_imm(reg_oj, oj_end_value, reg_tmp_imm);
     b(GE, oh_label_end);
 
@@ -3682,8 +3683,8 @@ void jit_sve_conv_bwd_weights_kernel_f32_t<isa>::compute_oh_loop_partial() {
             : (jcp.is_1stconv ? 1 : jcp.ic_block);
     const int out_mult
             = is_ddst_layout_nxc() ? jcp.ngroups * jcp.oc : jcp.oc_block;
-    const int input_bottom_padding_overlap
-            = div_up(jcp.ih + jcp.t_pad - (jcp.kh - 1), jcp.stride_h);
+    const int input_bottom_padding_overlap = div_up(
+            nstl::max(0, jcp.ih + jcp.t_pad - (jcp.kh - 1)), jcp.stride_h);
 
     const size_t filter_shift = jcp.typesize_out * jcp.kw * ic_block * oc_block;
     const size_t input_shift = jcp.typesize_in * jcp.iw * inp_mult;
@@ -3828,8 +3829,8 @@ void jit_sve_conv_bwd_weights_kernel_f32_t<isa>::compute_od_loop_partial() {
             = is_ddst_layout_nxc() ? jcp.ngroups * jcp.oc : jcp.oc_block;
     int iw = jcp.iw;
     int ow = jcp.ow;
-    const int input_backpad_overlap
-            = div_up(jcp.id + jcp.f_pad - (jcp.kd - 1), jcp.stride_d);
+    const int input_backpad_overlap = div_up(
+            nstl::max(0, jcp.id + jcp.f_pad - (jcp.kd - 1)), jcp.stride_d);
 
     const size_t filter_shift
             = jcp.typesize_out * jcp.kh * jcp.kw * ic_block * oc_block;
@@ -3994,7 +3995,7 @@ status_t jit_sve_conv_bwd_weights_kernel_f32_t<isa>::init_conf(
     const bool with_groups = diff_weights_d.ndims() == src_d.ndims() + 1;
     int ndims = src_d.ndims();
 
-    jcp = zero<decltype(jcp)>();
+    jcp = utils::zero<decltype(jcp)>();
 
     jcp.simd_w = cpu_isa_traits<isa>::vlen / typesize;
     jcp.nthr = jcp.aligned_threads = nthreads;

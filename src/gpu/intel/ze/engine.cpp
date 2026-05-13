@@ -35,13 +35,13 @@ namespace ze {
 
 status_t engine_create(impl::engine_t **engine, engine_kind_t engine_kind,
         ze_driver_handle_t dri, ze_device_handle_t dev, ze_context_handle_t ctx,
-        size_t index) {
+        size_t index, const std::vector<uint8_t> &cache_blob) {
     gpu_assert(engine_kind == engine_kind::gpu);
     std::unique_ptr<ze::engine_t, engine_deleter_t> e(
             (new ze::engine_t(dri, dev, ctx, index)));
     if (!e) return status::out_of_memory;
 
-    CHECK(e->init());
+    CHECK(e->init(cache_blob));
     *engine = e.release();
 
     return status::success;
@@ -53,8 +53,12 @@ engine_t::engine_t(ze_driver_handle_t driver, ze_device_handle_t device,
               engine_kind::gpu, driver, device, context, index)) {}
 
 status_t engine_t::init() {
+    return init({});
+}
+
+status_t engine_t::init(const std::vector<uint8_t> &cache_blob) {
     CHECK(init_impl());
-    CHECK(intel::engine_t::init());
+    CHECK(intel::engine_t::init(cache_blob));
 
     return status::success;
 }
@@ -75,6 +79,8 @@ status_t engine_t::create_kernel(
 
 status_t engine_t::create_kernel(compute::kernel_t &kernel,
         const gemmstone::dsl::kernel_t &kernel_dsl) const {
+    // See `INCLUDE_EXTRA_DIRS_FOR_SYCL` comment.
+#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_ZE
     const auto &ze_kernel_and_module
             = gemmstone::dsl::make_kernel(kernel_dsl, context(), device());
     auto ze_module_ptr
@@ -82,6 +88,10 @@ status_t engine_t::create_kernel(compute::kernel_t &kernel,
                     ze_kernel_and_module.module);
     return kernel_t::make(
             kernel, ze_module_ptr, ze_kernel_and_module.kernel, {});
+#else
+    assert(!"ze::create_kernel with gemmstone::dsl::kernel_t is not expected");
+    return status::invalid_arguments;
+#endif
 }
 
 status_t engine_t::convert_to_ze(std::vector<compute::kernel_t> &kernels,
@@ -116,6 +126,8 @@ status_t engine_t::create_kernels(std::vector<compute::kernel_t> *kernels,
     const char *source = nullptr;
     for (size_t i = 0; source == nullptr && i < kernel_names.size(); i++)
         source = intel::get_kernel_source(kernel_names[i]);
+    VERROR_ENGINE(source, status::runtime_error,
+            "No OpenCL source was found for kernel");
 
     std::string options = kernel_ctx.options();
     auto *dev_info = utils::downcast<const device_info_t *>(device_info());
@@ -183,8 +195,8 @@ status_t engine_t::create_kernels_from_cache_blob(
         CHECK(cache_blob.get_binary(&binary_data, &binary_size));
 
         xpu::binary_t binary(binary_data, binary_data + binary_size);
-        CHECK(create_kernel_from_binary(
-                kernels[i], binary, kernel_names[i], compute::program_src_t()));
+        CHECK(create_kernel_from_binary(kernels[i], binary, kernel_name.c_str(),
+                compute::program_src_t()));
     }
 
     return status::success;
@@ -193,6 +205,24 @@ status_t engine_t::create_kernels_from_cache_blob(
 gpu_utils::device_id_t engine_t::device_id() const {
     return std::tuple_cat(
             std::make_tuple(1), xpu::ze::get_device_uuid(device()));
+}
+
+status_t engine_t::serialize_device(serialization_stream_t &sstream) const {
+    sstream.append_array(
+            device_info()->name().size(), device_info()->name().data());
+    sstream.append(device_info()->runtime_version().major);
+    sstream.append(device_info()->runtime_version().minor);
+    sstream.append(device_info()->runtime_version().build);
+
+    return status::success;
+}
+
+status_t engine_t::get_cache_blob_size(size_t *size) const {
+    return device_info_->get_cache_blob_size(size);
+}
+
+status_t engine_t::get_cache_blob(size_t size, uint8_t *cache_blob) const {
+    return device_info_->get_cache_blob(size, cache_blob);
 }
 
 ze_driver_handle_t engine_t::driver() const {
@@ -216,16 +246,14 @@ cl_context engine_t::ocl_context() const {
 }
 
 status_t engine_t::init_device_info() {
-    device_info_ = std::make_shared<ze::device_info_t>();
-    CHECK(device_info_->init(this));
-
-    return status::success;
+    return init_device_info({});
 }
 
 status_t engine_t::init_device_info(const std::vector<uint8_t> &cache_blob) {
-    gpu_assert(false) << "unimplemented function init_device_info() called";
+    device_info_ = std::make_shared<ze::device_info_t>();
+    CHECK(device_info_->init(this, cache_blob));
 
-    return status::runtime_error;
+    return status::success;
 }
 
 } // namespace ze

@@ -1113,8 +1113,8 @@ status_t brg_blocking_t::calc_blocks() {
 
     const auto thr_eff_threshold = 0.9f;
     const auto max_iw_block_thr = utils::saturate(1, sp,
-            static_cast<int>(div_up(
-                    mb * ngroups * nb_ic * is, thr_eff_threshold * nthr)));
+            static_cast<int>(ceil(
+                    mb * ngroups * nb_ic * is / (thr_eff_threshold * nthr))));
 
     iw_block = is_block = sp_block = -1;
     brg_blocking_t best_brgb = *this;
@@ -1512,7 +1512,7 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             = everyone_is(f32, jcp.src_dt, jcp.dst_dt) && jcp.wei_dt == f16;
     jcp.is_tf32 = everyone_is(f32, jcp.src_dt, jcp.wei_dt)
             && one_of(attr.fpmath_.mode_, fpmath_mode::tf32, fpmath_mode::any)
-            && is_superset(isa, avx10_2_512_amx_2);
+            && is_superset(isa, avx10_2_amx_2);
 
     VDISPATCH_CONV_IC(!jcp.is_bf32, VERBOSE_UNSUPPORTED_DT);
 
@@ -1710,7 +1710,8 @@ void set_k_range(int P, int D, int S, dim_t i, dim_t O, int K, int &k_s,
 
     k_f = is_w ? K : nstl::min(K, static_cast<int>(div_up(i + P + 1, D)));
     k_s = is_w ? 0
-               : nstl::max(0, static_cast<int>(div_up(i + P - O * S + 1, D)));
+               : static_cast<int>(
+                         div_up(nstl::max((dim_t)0, i + P - O * S + 1), D));
 
     while (k_s % S != s)
         k_s++;

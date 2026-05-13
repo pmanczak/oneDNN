@@ -53,6 +53,8 @@ struct EmulationStrategy {
             else
                 emulate64_mul = emulate64_logic = true;
         }
+        if (hw_ >= HW::Xe3p)
+            emulateDWxDW = emulate64_mul = false;
         emulate64_mul |= emulate64;
     }
 };
@@ -281,6 +283,7 @@ struct EmulationImplementation {
                 && dst.getType() == DataType::f) {
             RegData hfTmp = src0;
             hfTmp.setType(DataType::uw);
+            hfTmp.setRegion(hfTmp.getVS(), hfTmp.getWidth(), dst.getHS() * 2);
             g.shl(mod, hfTmp, src0.setType(DataType::ub), 8, loc);
             g.mov(mod, dst, hfTmp.setType(DataType::hf), loc);
         } else
@@ -590,18 +593,33 @@ struct EmulationImplementation {
                 = g.acc0.retype(dstDWType)[dstHi.getOffset()](dstHi.getHS());
 
             if(s1W) {
-                g.mul(mod, accLo, s0Lo, src1, loc);
-                g.mach(mod, dstLo, s0Lo, 0, loc);
-                g.mad(mod, dstHi, dstLo, s0Hi, src1, loc);
-                g.mov(mod, dstLo, accLo, loc);
+                if (emulateDWxDW) {
+                    g.mul(mod, accLo, s0Lo, src1, loc);
+                    g.mach(mod, dstLo, s0Lo, 0, loc);
+                    g.mad(mod, dstHi, dstLo, s0Hi, src1, loc);
+                    g.mov(mod, dstLo, accLo, loc);
+                } else {
+                    dstHi.setType(isSigned(dst.getType()) ? DataType::d : DataType::ud);
+                    g.mul(mod, accHi, s0Hi, src1, loc);
+                    g.mul(mod, dst, s0Lo, src1, loc);
+                    g.add(mod, dstHi, dstHi, accHi, loc);
+                }
             } else if(s1D) {
                 auto s1Lo = lowWord(src1);
-                g.mul(mod, accLo, s0Lo, s1Lo, loc);
-                g.mach(mod, dstLo, s0Lo, src1, loc);
-                g.mul(mod, accHi, s0Hi, s1Lo, loc);
-                g.macl(mod, dstHi, s0Hi, src1, loc);
-                g.add(mod, dstHi, dstHi, dstLo, loc);
-                g.mov(mod, dstLo, accLo, loc);
+                if (emulateDWxDW){
+                    g.mul(mod, accLo, s0Lo, s1Lo, loc);
+                    g.mach(mod, dstLo, s0Lo, src1, loc);
+                    g.mul(mod, accHi, s0Hi, s1Lo, loc);
+                    g.macl(mod, dstHi, s0Hi, src1, loc);
+                    g.add(mod, dstHi, dstHi, dstLo, loc);
+                    g.mov(mod, dstLo, accLo, loc);
+                }else{
+                    dstHi.setType(isSigned(dst.getType()) ? DataType::d : DataType::ud);
+                    g.mul(mod, accHi, s0Hi, src1, loc);
+                    g.mul(mod, dst, s0Lo, src1, loc);
+                    g.add(mod, dstHi, dstHi, accHi, loc);
+                }
+
             } else stub();
         } else if (s1Q) {
             if(!s1Immed) {
@@ -624,12 +642,19 @@ struct EmulationImplementation {
                     = g.acc0.retype(s0Type)[dstLo.getOffset()](dstLo.getHS());
             auto accHi
                     = g.acc0.retype(s0Type)[dstHi.getOffset()](dstHi.getHS());
-            g.mul(mod, accHi, src0, s1W2, loc);
-            g.macl(mod, dstHi, src0, s1Hi, loc);
-            g.mul(mod, accLo, src0, s1W0, loc);
-            g.mach(mod, dstLo, src0, s1Lo, loc);
-            g.add(mod, dstHi, dstHi, dstLo, loc);
-            g.mov(mod, dstLo, accLo, loc);
+            if (emulateDWxDW) {
+                g.mul(mod, accHi, src0, s1W2, loc);
+                g.macl(mod, dstHi, src0, s1Hi, loc);
+                g.mul(mod, accLo, src0, s1W0, loc);
+                g.mach(mod, dstLo, src0, s1Lo, loc);
+                g.add(mod, dstHi, dstHi, dstLo, loc);
+                g.mov(mod, dstLo, accLo, loc);
+            } else {
+                dstHi.setType(isSigned(dst.getType()) ? DataType::d : DataType::ud);
+                g.mul(mod, accHi, src0, s1Hi, loc);
+                g.mul(mod, dst, src0, s1Lo, loc);
+                g.add(mod, dstHi, dstHi, accHi, loc);
+            }
         } else if (dstQ && s0W && s1W) {
             RegData dstLo, dstHi;
             splitToDW(dst, dstLo, dstHi);
@@ -645,7 +670,7 @@ struct EmulationImplementation {
                 g.mov(mod, dstHi, 0, loc);
         } else if (dstQ && s0W && s1D) {
             stub();
-        } else if (dstQ && s0D && s1W && !s1Immed && !emulate64 && !strategy.emulateDWxDW) {
+        } else if (dstQ && s0D && s1W && !s1Immed && !emulate64 && !emulateDWxDW && g.getHardware() < HW::Xe3) {
             auto acc = g.acc0.d();
             g.mov(mod, acc, src1, loc);
             g.mul(mod, dst, acc, src0, loc);
@@ -663,6 +688,13 @@ struct EmulationImplementation {
             g.mov(mod, dstHi, dstLo, loc);
             g.mov(mod, dstLo, acc, loc);
 
+        } else if (dstQ && s0D && ((s1W && !s1Immed) && !emulateDWxDW)) {
+            RegData dstLo, dstHi;
+            splitToDW(dst, dstLo, dstHi);
+            if(dstLo.getBase() == src0.getBase() && src0.getOffset() == dstLo.getOffset())
+                stub();
+            g.mov(mod, dstLo, src1);
+            g.mul(mod, dst, src0, dstLo);
         } else if (dstD && s0D && s1D && strategy.emulateDWxDW) {
             int ne1 = GRF::bytes(g.getHardware()) >> 2;
 

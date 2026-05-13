@@ -80,8 +80,9 @@ bool Generator<hw>::gemmMake2DQuantizationLayouts(bool isA, const GEMMProblem &p
 
     int cpoDiv = 1;
     if (Txo_int.isInt8()) Txo_int = Type::s16, cpoDiv = 2;
-
-    if (xs2D && (Txs.paddedSize() > Tx.paddedSize()) && Tx.isInteger()) {
+    // Use lateScale for cases of applying scale to inputs that will be natively dpas'd
+    // but do not support add/mul.
+    if (xs2D && ((Txs.paddedSize() > Tx.paddedSize() && Tx.isInteger()) || problem.forceLateQuant(minOuterProductCount(problem, strategy)) || state.useBDPAS)) {
         lateScale = true;
         Txs_int = problem.Tc;
     }
@@ -96,6 +97,8 @@ bool Generator<hw>::gemmMake2DQuantizationLayouts(bool isA, const GEMMProblem &p
     if (lateOffset && (Txo.isInt4() || Txo.isInt8()))
         Txo_int = Type::s32;
 
+    if (Txs == Type::f8_e8m0 && state.useBDPAS)
+	Txs_int = Type::f8_e8m0;
     // Get tile sizes, depending on whether A/B are copied to SLM.
     // For late scaling (after compute), scales are always applied to the whole tile.
     int r, c, k, rNoSLM, cNoSLM;
@@ -191,6 +194,16 @@ bool Generator<hw>::gemmMake2DQuantizationLayouts(bool isA, const GEMMProblem &p
                                          int m, int n, int cp, bool forceRepack) mutable {
         if (cp > 1 || (cColMajor && (cp != src[0].crosspack)) || Txq != Txq_int || forceRepack) {
             bool allowPartialRegs = false;
+            // Native MXFP DPAS support
+            if (state.useBDPAS) {
+                allowPartialRegs = true;
+                cp = 1;
+                if (isA) {
+                    tileR = problem.aqGroupK;
+                } else {
+                    tileC = problem.bqGroupK;
+                }
+            }
             repack = RegisterLayout(hw, Txq_int, m, n, wantCM, cp, tileR, tileC, allowPartialRegs);
         }
     };
@@ -222,6 +235,20 @@ void Generator<hw>::gemmRepack2DQuantizationData(Type Ts, Type Td, const Registe
     for (int doffR = 0; doffR < layoutDst.rows(); doffR += layoutSrc.rows())
         for (int doffC = 0; doffC < layoutDst.cols(); doffC += layoutSrc.cols())
             copyRegisters(Ts, Td, layoutSrc, layoutDst, src, dst, doffR, doffC, false, strategy, state);
+
+    int r = layoutDst.rows();
+    int c = layoutDst.cols();
+    // FP4 bdpas with group > 32 requires duplicating scales into upper half of registers.
+    if(state.useBDPAS && r * c < minOuterProductCount(problem, strategy)){
+        int halfRegElems = elementsPerGRF(hw, Td) / 2;
+        if(r * c > halfRegElems) stub();
+        RegisterLayout offsetLayout(layoutDst);
+        for( auto &b : offsetLayout){
+            if(b.nr * b.nc > halfRegElems) stub();
+            b.offsetBytes += (b.nr * b.nc);
+        }
+        copyRegisters(Td, Td, layoutDst, offsetLayout, dst, dst, 0, 0, false, strategy, state); 
+    }
 
     // Duplicate data in padded region. TODO: do this as part of the copy.
     int cp = layoutDst[0].crosspack;
@@ -305,20 +332,23 @@ template <HW hw>
 void Generator<hw>::gemmDequantizeOperation(bool doA, Type T, Type Tq, BinaryOp op,
                                             const RegisterLayout &layout, const RegisterLayout &qlayout,
                                             const GRFMultirange &regs, const GRFMultirange &qregs,
-                                            int h, int kab_load, int kq_load, const GEMMProblem &problem, CommonState &state)
+                                            int h, int kab_load, int kq_load, const GEMMProblem &problem, const CommonStrategy &strategy, CommonState &state)
 {
     int xqGroupK  = doA ? problem.aqGroupK : problem.bqGroupK;
     int xqGroupMN = doA ? problem.aqGroupM : problem.bqGroupN;
 
     bool common = (qlayout.rows() * qlayout.cols()) == 1;
+    bool colMajor = layout.colMajor();
+    int xqGroupX = colMajor == doA ? xqGroupMN : xqGroupK;
+    int xqGroupY = colMajor == doA ? xqGroupK : xqGroupMN;
 
-    bool bfSpecialPath = (T == Type::bf16) && (Tq == Type::f32) && (xqGroupMN > 1) && layout.hasFullCrosspack(2);
+    bool bfSpecialPath = (T == Type::bf16) && (Tq == Type::f32) && (xqGroupMN > 1) && layout.hasFullCrosspack(2) && (xqGroupY == 1);
     GRFMultirange qPairs;
     int npairs = 0;
 
     if (bfSpecialPath) {
         for (npairs = 8; npairs > 0; npairs >>= 1) {
-            qPairs = tryChunkAlloc(npairs, 1, Bundle(), BundleGroup::AllBundles(), state);
+            qPairs = tryChunkAlloc(npairs, 1, BundleGroup::AllBundles(), BundleGroup::AllBundles(), state);
             if (!qPairs.empty()) break;
         }
         if (qPairs.empty()) throw out_of_registers_exception();
@@ -326,12 +356,8 @@ void Generator<hw>::gemmDequantizeOperation(bool doA, Type T, Type Tq, BinaryOp 
 
     for (auto &block: layout) {
         auto crosspack = block.crosspack;
-        bool colMajor = block.colMajor;
         int nx = colMajor ? block.nr : block.nc;
         int ny = colMajor ? block.nc : block.nr;
-
-        int xqGroupX = colMajor == doA ? xqGroupMN : xqGroupK;
-        int xqGroupY = colMajor == doA ? xqGroupK : xqGroupMN;
 
         // If crosspack spans multiple groups, use a stride to restrict to one group
         bool qbroadcastY = (xqGroupY % crosspack == 0) || common || bfSpecialPath;
@@ -398,7 +424,7 @@ void Generator<hw>::gemmDequantizeOperation(bool doA, Type T, Type Tq, BinaryOp 
                         add(simd, data(strided), data(strided), -qdata(strideq));
                     break;
                 case BinaryOp::Mul:
-                    mul(simd, data(strided), data(strided), qdata(strideq));
+                    emul(simd, data(strided), data(strided), qdata(strideq), strategy, state);
                     break;
                 case BinaryOp::ScaleSub:
                     if (T != Type::f16) stub();
@@ -467,7 +493,7 @@ void Generator<hw>::dequantizeInt4(bool doA, const RegisterLayout &layoutSrc, co
     //     so two multiplications are needed.
     if (!layoutOffset.empty()) {
         if (!problem) stub();
-        gemmDequantizeOperation(doA, Type::f16, Type::f16, BinaryOp::ScaleSub, *effLayoutDst, layoutOffset, *effDst, offset, h, kab_load, kq_load, *problem, state);
+        gemmDequantizeOperation(doA, Type::f16, Type::f16, BinaryOp::ScaleSub, *effLayoutDst, layoutOffset, *effDst, offset, h, kab_load, kq_load, *problem, strategy, state);
     } else {
         map(hw, Type::f16, *effDst, *effLayoutDst, strategy, [&](int esize, RegData r) {
             s4 ? mad(esize, r, Immediate::hf(0x9800), r, Immediate::hf(0x6C00)) /* 0x9800 = -8*2^(-12), 0x6C00 = 2^12 */
@@ -484,7 +510,7 @@ void Generator<hw>::dequantizeInt4(bool doA, const RegisterLayout &layoutSrc, co
     //      this could be merged into the previous multiplication.
     if (!f32 && !layoutScale.empty()) {
         if (!problem) stub();
-        gemmDequantizeOperation(doA, Type::f16, Type::f16, BinaryOp::Mul, *effLayoutDst, layoutScale, *effDst, scale, h, kab_load, kq_load, *problem, state);
+        gemmDequantizeOperation(doA, Type::f16, Type::f16, BinaryOp::Mul, *effLayoutDst, layoutScale, *effDst, scale, h, kab_load, kq_load, *problem, strategy, state);
     }
 
     // 6) Convert to dst type if needed.
@@ -496,7 +522,7 @@ void Generator<hw>::dequantizeInt4(bool doA, const RegisterLayout &layoutSrc, co
     // 7) Apply scales for f32 after f16->f32 upconversion.
     if (f32 && !layoutScale.empty()) {
         if (!problem) stub();
-        gemmDequantizeOperation(doA, Type::f32, Type::f32, BinaryOp::Mul, layoutDst, layoutScale, dst, scale, h, kab_load, kq_load, *problem, state);
+        gemmDequantizeOperation(doA, Type::f32, Type::f32, BinaryOp::Mul, layoutDst, layoutScale, dst, scale, h, kab_load, kq_load, *problem, strategy, state);
     }
 }
 
@@ -563,12 +589,18 @@ void Generator<hw>::gemmDequantizeAB(bool doA, const RegisterLayout &layoutSrc, 
             convert(src, Tsrc, Tx_int, strategy, state);
 
         if (xo2D) {
-            gemmDequantizeOperation(doA, Tx_int, Txo_int, BinaryOp::Sub, layoutDst, oLayout, dst, oRegs, h, kab_load, kq_load, problem, state);
+            if (!state.useBDPAS)
+            {
+            gemmDequantizeOperation(doA, Tx_int, Txo_int, BinaryOp::Sub, layoutDst, oLayout, dst, oRegs, h, kab_load, kq_load, problem, strategy, state);
             convert(dst, Tx_int, Tdst, strategy, state);
+            }
         }
 
         if (xs2D)
-            gemmDequantizeOperation(doA, Tdst, Txs_int, BinaryOp::Mul, layoutDst, sLayout, dst, sRegs, h, kab_load, kq_load, problem, state);
+            if (!state.useBDPAS)
+            {
+            gemmDequantizeOperation(doA, Tdst, Txs_int, BinaryOp::Mul, layoutDst, sLayout, dst, sRegs, h, kab_load, kq_load, problem, strategy, state);
+	    }
     }
 
     if (ms < md || ns < nd) {

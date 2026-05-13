@@ -31,6 +31,7 @@ fill_cfg_t::fill_cfg_t(dnnl_data_type_t dt, float range_min_val,
     : dt_(dt)
     , range_min_val_(MAX2(lowest_dt(dt_), range_min_val))
     , range_max_val_(MIN2(max_dt(dt_), range_max_val))
+    , density_(1.f)
     , only_integer_(is_integral_dt(dt_) || only_integer)
     , name_(name) {
     if (alg == attr_t::post_ops_t::kind_t::SUB) {
@@ -54,10 +55,15 @@ fill_cfg_t::fill_cfg_t(dnnl_data_type_t dt, float range_min_val,
 
 fill_cfg_t::fill_cfg_t(
         const std::vector<float> &user_set, const std::string &name)
+    : fill_cfg_t(user_set, 1.f, name) {}
+
+fill_cfg_t::fill_cfg_t(const std::vector<float> &user_set, float density,
+        const std::string &name)
     : dt_(dnnl_data_type_undef)
     , range_min_val_(-FLT_MAX)
     , range_max_val_(FLT_MAX)
     , predefined_set_(user_set)
+    , density_(density)
     , only_integer_(false)
     , name_(name) {
     assert(!predefined_set_.empty());
@@ -81,6 +87,8 @@ std::string fill_cfg_t::print_verbose() const {
         ss << " range:[" << range_min_val_ << ";" << range_max_val_ << "]";
         if (only_integer_) ss << " only_integer:true";
     }
+
+    if (density_ < 1.f) { ss << " density:" << density_; }
 
     return ss.str();
 }
@@ -139,7 +147,7 @@ int fill_scales(const attr_t::arg_scales_t::entry_t &e, dnn_mem_t &mem_dt,
 
     if (mem_dt) { assert(mem_dt.nelems() == mem_fp.nelems()); }
 
-    if (e.policy == policy_t::COMMON || e.policy == policy_t::HOST_SCALAR) {
+    if (e.has_single_element()) {
         assert(nelems == 1);
         mem_fp.set_f32_elem(0, e.scale);
         if (mem_dt) mem_dt.set_elem(0, e.scale);
@@ -182,7 +190,7 @@ int fill_zero_points(
     assert(mem_dt.nelems() == mem_fp.nelems());
 
     const auto &e = attr.zero_points.get(arg);
-    if (e.policy == policy_t::COMMON || e.policy == policy_t::HOST_SCALAR) {
+    if (e.has_single_element()) {
         assert(nelems == 1);
         mem_fp.set_f32_elem(0, e.value);
         if (mem_dt) mem_dt.set_elem(0, e.value);
@@ -223,6 +231,8 @@ int fill_random_real_dense(dnn_mem_t &mem, dnn_mem_t &mem_ref, res_t *res,
 
     // This function doesn't handle the predefined set yet.
     assert(fill_cfg.predefined_set_.empty());
+    // This function doesn't handle density yet.
+    assert(fill_cfg.density_ == 1.f);
 
     // The `nelems()` function returns a product of dims/pdims regardless of
     // whether the tensor is dense or sparse (this is by design). Because of

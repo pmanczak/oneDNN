@@ -30,7 +30,7 @@ void Generator<hw>::gemmMicrokernel(GEMMProblem problem, GEMMStrategy strategy, 
 
     interface = interface_;
 
-    problem.autoTypeConversions(hw, strategy.systolic);
+    problem.autoTypeConversions(strategy.systolic);
     gemmInitState(problem, strategy, state);
     for (int q = 0; q < 2; q++)
         state.ra.safeRelease(state.emulate.temp[q]);
@@ -50,7 +50,10 @@ void Generator<hw>::gemmMicrokernel(GEMMProblem problem, GEMMStrategy strategy, 
     state.isNested = true;
 
     /* Leave some space for host kernel arguments */
-    state.ra.claim((GRF::bytes(hw) >= 64) ? r0-r6 : r0-r8);
+    // The host side arguments with 32 byte size registers (DG2)
+    // use 16 registers include padding bytes (aligned with 128 bytes)
+    // r0, r4 are reserved for system threads
+    state.ra.claim((GRF::bytes(hw) >= 64) ? r0-r9 : r0-r15);
 
     state.fullK = state.inputs.k;
 
@@ -199,7 +202,7 @@ microkernel::Package Generator<hw>::gemmMicrokernelPackage(const GEMMProblem &pr
     Package package;
 
     auto problem = problem_;
-    problem.autoTypeConversions(hw, strategy.systolic);
+    problem.autoTypeConversions(strategy.systolic);
 
     gemmMicrokernel(problem, strategy, interface_);
 
@@ -341,6 +344,11 @@ static inline microkernel::StructuredType::Type microType(Type T)
         CASE(u16)
         CASE(u8)
         CASE(u4)
+        CASE(bf8)
+        CASE(hf8)
+        CASE(f8_e8m0)
+        CASE(f4_e2m1)
+        CASE(f4_e3m0)
         default: stub("Unsupported type");
     }
 #undef CASE
