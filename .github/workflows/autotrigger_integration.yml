@@ -164,7 +164,12 @@ jobs:
           )
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TRIGGER_PHRASE: "make test_ov"
+          TRIGGER_PHRASE: |
+            OV Integration trigger bot here.
+            Triggering build-only OV integration pipeline. Check results.
+            make test_ov
+            disable IGPU
+            disable DGPU
         run: |
-          echo "PR modifies relevant files, meets trigger conditions, and has no prior OV integration trigger comment."
+          echo "PR modifies relevant files, meets trigger conditions, and has no relevant OV integration trigger comments."
           gh pr comment "${{ steps.context.outputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --body "$TRIGGER_PHRASE"
