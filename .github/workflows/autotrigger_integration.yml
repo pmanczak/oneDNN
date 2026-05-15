@@ -75,7 +75,6 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           token: ${{ github.token }}
-          pr-number: ${{ steps.context.outputs.pr_number }}
           filters: |
             relevant_files:
               - 'src/gpu/**'
