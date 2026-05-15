@@ -1219,9 +1219,9 @@ bool Generator<hw>::gemmAccumulateCSetup(GEMMProblem &problem, GEMMStrategy &str
     if (strategy.slmBuffers > 0) {
         int A_slmCP, B_slmCP;
         int A_tileR, A_tileC, B_tileR, B_tileC;
-        std::tie(A_slmCP, B_slmCP) = targetSLMCrosspack(hw, problem, strategy);
+        std::tie(A_slmCP, B_slmCP) = targetSLMCrosspack(problem, strategy);
         std::tie(A_tileR, A_tileC, B_tileR, B_tileC) = targetKernelTiling(hw, problem, strategy);
-        auto opCount = outerProductCount(hw, problem, strategy);
+        auto opCount = outerProductCount(problem, strategy);
 
         if (slmA) {
             coopSplit(true, state.ma_slm, state.ka_slm, unrollM, unrollKSLM, strategy.wgTile(LoopM), state.effCoopA, problem.A, strategy);
@@ -1635,6 +1635,12 @@ bool Generator<hw>::gemmAccumulateCSetup(GEMMProblem &problem, GEMMStrategy &str
     state.repackA |= problem.earlyDequantizeA() && !slmA;
     state.repackB |= problem.earlyDequantizeB() && !slmB;
 
+    bool is_xe3p = (hw == ngen::HW::Xe3p);
+    state.upConvertATo8Bit =  is_xe3p && Ta.bits() == 4 && Tb.bits() == 8 && strategy.systolic;
+    state.upConvertBTo8Bit =  is_xe3p && Tb.bits() == 4 && Ta.bits() == 8 && strategy.systolic;
+
+    state.repackA |= state.upConvertATo8Bit;
+    state.repackB |= state.upConvertBTo8Bit;
     if (crosspackA == 0) crosspackA = 1;
     if (crosspackB == 0) crosspackB = 1;
 
@@ -1651,16 +1657,22 @@ bool Generator<hw>::gemmAccumulateCSetup(GEMMProblem &problem, GEMMStrategy &str
         int repackN = state.ka_repack;
         if (problem.aqGroupK % state.ka_repack != 0 && state.ka_repack % problem.aqGroupK != 0){
                 state.ka_repack = gcd(problem.aqGroupK, state.ka_repack);
-                repackN = std::max(state.ka_repack, outerProductCount(hw, problem, strategy));
+                repackN = std::max(state.ka_repack, outerProductCount(problem, strategy));
         }
-        state.Ar_layout = RegisterLayout(hw, Ta, unrollM, repackN, state.A_layout.colMajor(), crosspackA, tileM_A, tileK_A, true, splitA);
+	    auto Ta_repack = Ta;
+	    if (state.upConvertATo8Bit)
+	    	Ta_repack = Ta == Type::s4 ? Type::s8 : Type::u8;
+	    state.Ar_layout = RegisterLayout(hw, Ta_repack, unrollM, repackN, state.A_layout.colMajor(), state.upConvertATo8Bit ? crosspackA/2 : crosspackA, tileM_A, tileK_A, true, splitA);
     }
 
-    if (state.repackB)
-        state.Br_layout = RegisterLayout(hw, Tb, strategy.kb_load, unrollN, state.B_layout.colMajor(), crosspackB, tileK_B, tileN_B, true, splitB);
-
+    if (state.repackB) {
+	    auto Tb_repack = Tb;
+	    if (state.upConvertBTo8Bit)
+	        Tb_repack = Tb == Type::s4 ? Type::s8 : Type::u8;
+	    state.Br_layout = RegisterLayout(hw, Tb_repack, strategy.kb_load, unrollN, state.B_layout.colMajor(), state.upConvertBTo8Bit ? crosspackB/2 : crosspackB, tileK_B, tileN_B, true, splitB);
+    }
     // Prepare to repack C if needed, and choose repack tile size.
-    if (Tc != Tc_compute) {
+    if (Tc != Tc_compute || problem.forceLateQuant(minOuterProductCount(problem, strategy))) {
         auto &period = state.cRepackPeriod;
         int panel = strategy.cRepackPanel;
         if (panel == 0)
@@ -1682,7 +1694,7 @@ bool Generator<hw>::gemmAccumulateCSetup(GEMMProblem &problem, GEMMStrategy &str
         } else {
             // Repack partial tiles, interleaved with computation.
             Cr_unrollX = panel;
-            period = outerProductCount(hw, problem, strategy);
+            period = outerProductCount(problem, strategy);
         }
 
         if (strategy.kInterleave)
@@ -2566,7 +2578,7 @@ void Generator<hw>::gemmInitInterface(GEMMProblem &problem, GEMMStrategy &strate
         interface.requireBarrier();
     }
 
-    size_t slm = maxSLMPerWG(hw, strategy.GRFs);
+    size_t slm = maxSLMPerWG(problem.product, strategy.GRFs);
     if (slmSize > slm || slmPerK * strategy.wg[LoopK] > slm)
         stub("Strategy requests more SLM than available");
 
@@ -3173,6 +3185,7 @@ void Generator<hw>::gemmInitState(GEMMProblem &problem, GEMMStrategy &strategy, 
         state.tempCStrategy.padded = true;
     }
 
+    state.useBDPAS = problem.preferBDPAS() && strategy.systolic;
 }
 
 GEMMSTONE_NAMESPACE_END

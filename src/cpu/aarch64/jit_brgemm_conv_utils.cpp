@@ -1,6 +1,6 @@
 /*******************************************************************************
 * Copyright 2021 Intel Corporation
-* Copyright 2024 FUJITSU LIMITED
+* Copyright 2024-2026 FUJITSU LIMITED
 * Copyright 2024-2025 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -1204,8 +1204,8 @@ status_t brg_blocking_t::calc_blocks() {
 
     const auto thr_eff_threshold = 0.9f;
     const auto max_ow_block_thr = utils::saturate(1, ow,
-            static_cast<int>(div_up(
-                    mb * ngroups * nb_oc * os, thr_eff_threshold * nthr)));
+            static_cast<int>(ceil(
+                    mb * ngroups * nb_oc * os / (thr_eff_threshold * nthr))));
 
     ow_block = os_block = sp_block = -1;
     brg_blocking_t best_brgb = *this;
@@ -1554,8 +1554,8 @@ void brg_blocking_t::calc_blocks_1x1() {
         os_block = 0;
 
         const auto max_ow_block_thr = utils::saturate(1, ow,
-                static_cast<int>(div_up(
-                        mb * ngroups * nb_oc * os, thr_eff_threshold * nthr)));
+                static_cast<int>(ceil(mb * ngroups * nb_oc * os
+                        / (thr_eff_threshold * nthr))));
         const auto max_ow_block_L2 = max_sp_block_L2;
 
         start_sp_block = utils::saturate(
@@ -1609,7 +1609,7 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     const bool with_groups = weights_d.ndims() == src_d.ndims() + 1;
     int ndims = src_d.ndims();
 
-    jcp = zero<decltype(jcp)>();
+    jcp = utils::zero<decltype(jcp)>();
     jcp.isa = isa;
 
     jcp.ndims = ndims;
@@ -1685,12 +1685,20 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     if (jcp.wei_plain)
         CHECK(pick_tags(jcp, src_md, weights_md, dst_md, bias_md));
 
+    const bool is_f32
+            = jcp.src_dt == data_type::f32 && jcp.wei_dt == data_type::f32;
+
     if (one_of(jcp.prop_kind, prop_kind::forward_training,
                 prop_kind::forward_inference)
             && jcp.ngroups == 1 && jcp.dilate_w == 0 && jcp.kw > 1
-            && jcp.stride_w > 1 && jcp.l_pad <= 0 && jcp.r_pad <= 0) {
+            && jcp.stride_w > 1 && jcp.l_pad <= 0 && jcp.r_pad <= 0 && is_f32) {
         // such convolutions are equivalent to
         // [iw / k][kw / k][stride_w / k][ic * k]
+        // Folding is limited to f32 because int8/bf16 dot-product instructions
+        // (sdot/bfdot) require 4-byte contiguity in the K-dimension. Folding
+        // requires interleaving weights across spatial positions (KW) into
+        // these VNNI-style 4-byte blocks, which is not supported by current
+        // AArch64 reorders.
         const bool pure_1d = (jcp.mb == 1 && jcp.id == 1 && jcp.ih == 1);
         int w_koef = 1;
         auto w_koef_max = nstl::min(jcp.kw, nstl::min(jcp.stride_w, jcp.iw));
@@ -1838,14 +1846,14 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     MAYBE_UNUSED(selected_ur);
 
     auto try_exec_type = [&]() {
-        brg_blocking_t best_brgb = zero<decltype(best_brgb)>();
+        brg_blocking_t best_brgb = utils::zero<decltype(best_brgb)>();
         best_brgb.oc_block = min_oc_block;
         auto start_ocb = 4;
         start_ocb = nstl::min(div_up(jcp.oc, jcp.acc_simd_w), start_ocb);
 
         auto finish_ocb = 1;
         for (auto ocb = start_ocb; ocb >= finish_ocb; ocb--) {
-            brg_blocking_t cur_brgb = zero<decltype(best_brgb)>();
+            brg_blocking_t cur_brgb = utils::zero<decltype(best_brgb)>();
             cur_brgb.get_from_jcp(jcp);
             cur_brgb.oc_block = ocb * jcp.acc_simd_w;
             cur_brgb.nb_oc = utils::div_up(jcp.oc, cur_brgb.oc_block);
@@ -1876,8 +1884,8 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     bool try_exec_trans = false;
     bool try_exec_base = true;
 
-    if (div_up(jcp.l_pad, jcp.stride_w) < jcp.kw
-            && div_up(jcp.r_pad, jcp.stride_w) < jcp.kw) {
+    if (div_up(nstl::max(0, jcp.l_pad), jcp.stride_w) < jcp.kw
+            && div_up(nstl::max(0, jcp.r_pad), jcp.stride_w) < jcp.kw) {
         try_exec_vpad = true;
     }
 
@@ -2082,7 +2090,7 @@ status_t init_1x1_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     // max_batch is 1 for 1x1 convolutions
     jcp.max_batch = 1;
 
-    brg_blocking_t best_brgb = zero<decltype(best_brgb)>();
+    brg_blocking_t best_brgb = utils::zero<decltype(best_brgb)>();
     best_brgb.oc_block = min_oc_block;
     auto start_ocb = 4;
     start_ocb = nstl::min(div_up(jcp.oc, jcp.acc_simd_w), start_ocb);
@@ -2097,7 +2105,7 @@ status_t init_1x1_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     }
 
     for (auto ocb = start_ocb; ocb >= finish_ocb; ocb--) {
-        brg_blocking_t cur_brgb = zero<decltype(cur_brgb)>();
+        brg_blocking_t cur_brgb = utils::zero<decltype(cur_brgb)>();
         cur_brgb.get_from_jcp(jcp);
         cur_brgb.oc_block = ocb * min_oc_block;
         cur_brgb.nb_oc = utils::div_up(jcp.oc, cur_brgb.oc_block);

@@ -79,7 +79,8 @@
 
 #ifndef DNNL_EXPERIMENTAL_PROFILING
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL \
-        || DNNL_GPU_RUNTIME == DNNL_RUNTIME_SYCL
+        || DNNL_GPU_RUNTIME == DNNL_RUNTIME_SYCL \
+        || DNNL_GPU_RUNTIME == DNNL_RUNTIME_ZE
 using dnnl_profiling_data_kind_t = int;
 extern "C" dnnl_status_t dnnl_reset_profiling(dnnl_stream_t stream);
 extern "C" dnnl_status_t dnnl_query_profiling_data(dnnl_stream_t stream,
@@ -145,6 +146,7 @@ bool is_gpu(const dnnl_engine_t &engine = get_test_engine());
 bool is_async(const dnnl_engine_t &engine = get_test_engine());
 bool is_sycl_engine(const dnnl_engine_t &engine = get_test_engine());
 bool is_opencl_engine(const dnnl_engine_t &engine = get_test_engine());
+bool is_ze_engine(const dnnl_engine_t &engine = get_test_engine());
 bool is_nvidia_gpu(const dnnl_engine_t &engine = get_test_engine());
 bool is_f64_supported(const dnnl_engine_t &engine = get_test_engine());
 bool is_amd_gpu(const dnnl_engine_t &engine = get_test_engine());
@@ -615,7 +617,7 @@ int init_prim(const thr_ctx_t &thr_ctx,
 //
 // Note: a dedicated non-templated type for `setup_cmp_func_t` could be used but
 // since it relies on a `prb_t` type which is individual for each driver,
-// it is'nt possible without a template.
+// it isn't possible without a template.
 template <typename setup_cmp_func_t, typename prb_t>
 void check_correctness(const prb_t *prb, const std::vector<data_kind_t> &kinds,
         const args_t &args, const args_t &ref_args,
@@ -933,6 +935,16 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     const auto &scratch_md = query_md(const_pd, DNNL_ARG_SCRATCHPAD);
     mem_map.emplace(DNNL_ARG_SCRATCHPAD,
             dnn_mem_t(scratch_md, test_engine, /* prefill = */ true));
+
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+    // Grouped max variable dim hint
+    // Optional host scalar, created when src is a grouped descriptor
+    if (query_md_sparse_encoding(query_md(const_pd, DNNL_ARG_SRC))
+            == dnnl_grouped) {
+        auto hint_md = dnn_mem_t::init_host_scalar_md(dnnl_s32);
+        mem_map.emplace(DNNL_ARG_HINT_MAX_GROUP_SIZE, dnn_mem_t(hint_md));
+    }
+#endif
 
     // Binary post-op.
     // TODO: currently run-time dimensions are not supported in binary post-op.

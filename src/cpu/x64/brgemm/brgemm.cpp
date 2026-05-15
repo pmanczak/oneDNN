@@ -353,8 +353,8 @@ status_t brgemm_desc_set_postops(brgemm_desc_t *brg,
         return status::unimplemented;
     if (!IMPLICATION(one_of(data_type::f8_e5m2, dt_bias, dt_d)
                         || one_of(data_type::f8_e4m3, dt_bias, dt_d),
-                utils::one_of(true, mayiuse(avx512_core_amx_fp16),
-                        mayiuse(avx10_2_512))))
+                utils::one_of(
+                        true, mayiuse(avx512_core_amx_fp16), mayiuse(avx10_2))))
         return status::unimplemented;
     // check that combination of data types is allowed
     if ((brg->dt_a == data_type::u8 && brg->dt_b == data_type::s8)
@@ -593,7 +593,7 @@ status_t brgemm_desc_set_attr(
     if (brg->is_fp8
             && !utils::one_of(true,
                     is_superset(brg->isa_impl, avx512_core_amx_fp16),
-                    is_superset(brg->isa_impl, avx10_2_512)))
+                    is_superset(brg->isa_impl, avx10_2)))
         return status::unimplemented;
 
     return status::success;
@@ -616,6 +616,15 @@ status_t brgemm_desc_finalize(brgemm_desc_t *brg) {
         const int min_bd_block
                 = brg->bdb_tail > 0 ? brg->bdb_tail : brg->bd_block;
         if ((max_vpad > min_bd_block)) return status::unimplemented;
+    }
+
+    // Required for EVEX encoding for offsets
+    // The kernel brgemm_amx_uker_t has support of large offsets in post-ops
+    if (!brg->can_dispatch_uker()) {
+        const dim_t max_d_stride
+                = brg->LDD * types::data_type_size(brg->dt_d) * brg->bcast_dim;
+        if (max_d_stride > std::numeric_limits<int32_t>::max())
+            return status::unimplemented;
     }
 
     return status::success;

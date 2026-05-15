@@ -1,7 +1,7 @@
 /*******************************************************************************
 * Copyright 2016 Intel Corporation
 * Copyright 2024-2025 FUJITSU LIMITED
-* Copyright 2025 Arm Ltd. and affiliates
+* Copyright 2025-2026 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -1676,6 +1676,9 @@ struct memory : public handle<dnnl_memory_t> {
         BA24b8a = dnnl_BA24b8a,
         aCB24c8b = dnnl_aCB24c8b,
         abDC24d8c = dnnl_abDC24d8c,
+        BA12b8a = dnnl_BA12b8a,
+        aCB12c8b = dnnl_aCB12c8b,
+        abDC12d8c = dnnl_abDC12d8c,
         decbA16a = dnnl_decbA16a,
         decbA8a = dnnl_decbA8a,
         defcbA16a = dnnl_defcbA16a,
@@ -1738,6 +1741,9 @@ struct memory : public handle<dnnl_memory_t> {
         aCB16c8b = dnnl_aCB16c8b,
         BA8b8a = dnnl_BA8b8a,
         BA16b8a = dnnl_BA16b8a,
+        BA4b8a = dnnl_BA4b8a,
+        aCB4c8b = dnnl_aCB4c8b,
+        abDC4d8c = dnnl_abDC4d8c,
         AB2a4b = dnnl_AB2a4b,
 
         format_tag_last = dnnl_format_tag_last,
@@ -2827,6 +2833,22 @@ struct memory : public handle<dnnl_memory_t> {
         gIOw4o4i = dnnl_gIOw4o4i,
         gIOhw4o4i = dnnl_gIOhw4o4i,
         gIOdhw4o4i = dnnl_gIOdhw4o4i,
+        Abc8a = dnnl_Abc8a,
+        aBcdef8b = dnnl_aBcdef8b,
+        Oiw8o = dnnl_Oiw8o,
+        Oihw8o = dnnl_Oihw8o,
+        Oidhw8o = dnnl_Oidhw8o,
+        gOiw8o = dnnl_gOiw8o,
+        gOihw8o = dnnl_gOihw8o,
+        gOidhw8o = dnnl_gOidhw8o,
+        Abc32a = dnnl_Abc32a,
+        aBcdef32b = dnnl_aBcdef32b,
+        Oiw32o = dnnl_Oiw32o,
+        Oihw32o = dnnl_Oihw32o,
+        Oidhw32o = dnnl_Oidhw32o,
+        gOiw32o = dnnl_gOiw32o,
+        gOihw32o = dnnl_gOihw32o,
+        gOidhw32o = dnnl_gOidhw32o,
     };
 
     /// A memory descriptor.
@@ -14145,8 +14167,12 @@ enum class cpu_isa {
     avx10_1_512_amx_fp16 = dnnl_cpu_isa_avx10_1_512_amx_fp16,
     /// @copydoc dnnl_cpu_isa_avx512_core_amx_fp16
     avx512_core_amx_fp16 = dnnl_cpu_isa_avx512_core_amx_fp16,
+    /// @copydoc dnnl_cpu_isa_avx10_2
+    avx10_2 = dnnl_cpu_isa_avx10_2,
     /// @copydoc dnnl_cpu_isa_avx10_2_512
     avx10_2_512 = dnnl_cpu_isa_avx10_2_512,
+    /// @copydoc dnnl_cpu_isa_avx10_2_amx_2
+    avx10_2_amx_2 = dnnl_cpu_isa_avx10_2_amx_2,
     /// @copydoc dnnl_cpu_isa_avx10_2_512_amx_2
     avx10_2_512_amx_2 = dnnl_cpu_isa_avx10_2_512_amx_2,
 };

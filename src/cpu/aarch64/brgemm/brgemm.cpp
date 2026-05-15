@@ -1,6 +1,6 @@
 /*******************************************************************************
 * Copyright 2020 Intel Corporation
-* Copyright 2023-2025 FUJITSU LIMITED
+* Copyright 2023-2026 FUJITSU LIMITED
 * Copyright 2024-2025 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -223,6 +223,13 @@ status_t brgemm_desc_set_postops(brgemm_desc_t *brg,
     brg->attr = attr;
     brg->dst_md = dst_md;
 
+    if ((sme == brg->isa_impl)
+            && ((data_type::undef != dt_bias) || attr->post_ops_.len()
+                    || !attr->scales_.get(DNNL_ARG_SRC).has_default_values()
+                    || !attr->scales_.get(DNNL_ARG_WEIGHTS).has_default_values()
+                    || !attr->scales_.get(DNNL_ARG_DST).has_default_values()))
+        return status::unimplemented;
+
     brg->with_bias = (dt_bias == data_type::undef) ? false : true;
     brg->dt_bias = dt_bias;
     brg->typesize_bias = (dt_bias == data_type::undef)
@@ -235,7 +242,7 @@ status_t brgemm_desc_set_postops(brgemm_desc_t *brg,
     if (brg->is_int8) {
         if ((brg->dt_a == data_type::s8 && brg->dt_b == data_type::u8)
                 || (!one_of(dt_bias, data_type::undef, data_type::s8,
-                        data_type::u8, data_type::f32))
+                        data_type::u8, data_type::f32, data_type::s32))
                 || (!one_of(dt_d, data_type::s8, data_type::u8, data_type::s32,
                         data_type::f32)))
             return status::unimplemented;
@@ -243,12 +250,12 @@ status_t brgemm_desc_set_postops(brgemm_desc_t *brg,
     if ((brg->dt_a == data_type::bf16 && brg->dt_b == data_type::bf16)
             && ((!one_of(dt_d, data_type::bf16, data_type::f32))
                     || (!one_of(dt_bias, data_type::undef, data_type::bf16,
-                            data_type::f32))))
+                            data_type::f32, data_type::s32))))
         return status::unimplemented;
     if ((brg->dt_a == data_type::f32 && brg->dt_b == data_type::f32)
             && (!one_of(dt_d, data_type::f32))
             && (!one_of(dt_bias, data_type::undef, data_type::s8, data_type::u8,
-                    data_type::f32)))
+                    data_type::f32, data_type::s32)))
         return status::unimplemented;
 
     brg->dt_d = dt_d;
@@ -446,6 +453,9 @@ status_t brgemm_kernel_create(
     if (brg.is_dgmm) {
         CHECK(safe_ptr_assign<brgemm_kernel_t>(
                 *brg_kernel, new brdgmm_kernel_t(brg)));
+    } else if (sme == brg.isa_impl) {
+        CHECK(safe_ptr_assign<brgemm_kernel_t>(
+                *brg_kernel, new brgemm_sme_kernel_t(brg)));
     } else {
         CHECK(safe_ptr_assign<brgemm_kernel_t>(
                 *brg_kernel, new brgemm_kernel_common_t(brg)));

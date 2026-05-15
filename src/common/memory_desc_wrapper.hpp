@@ -191,7 +191,7 @@ struct memory_desc_wrapper : public c_compatible {
      * is true, and the number of data elements otherwise */
     dim_t nelems(bool with_padding = false) const {
         if (is_zero()) return 0;
-        if (has_runtime_dims()) return DNNL_RUNTIME_DIM_VAL;
+        if (has_runtime_dims()) return runtime_value_for<dim_t>();
         return utils::array_product(
                 with_padding ? padded_dims() : dims(), ndims());
     }
@@ -212,7 +212,9 @@ struct memory_desc_wrapper : public c_compatible {
     /** For sub-byte data types returns number of elements per byte.
      * For the rest data types returns 1. */
     size_t sub_byte_data_type_multiplier() const {
-        if (utils::one_of(data_type(), data_type::s4, data_type::u4)) return 2;
+        if (utils::one_of(data_type(), data_type::s4, data_type::u4,
+                    data_type::f4_e2m1, data_type::f4_e3m0))
+            return 2;
         return 1;
     }
 
@@ -309,7 +311,7 @@ struct memory_desc_wrapper : public c_compatible {
             return 0;
         }
 
-        if (has_runtime_dims_or_strides()) return DNNL_RUNTIME_SIZE_VAL;
+        if (has_runtime_dims_or_strides()) return runtime_value_for<size_t>();
 
         if (is_wino_desc()) {
             return wino_desc().size;
@@ -403,7 +405,8 @@ struct memory_desc_wrapper : public c_compatible {
                 switch (index) {
                     case 0:
                         // Return size for values.
-                        return nnz() * data_type_size();
+                        return utils::div_up(nnz() * data_type_size(),
+                                sub_byte_data_type_multiplier());
                     case 1: {
                         // Return size for offsets (group_count offsets).
                         const auto offsets_dt = metadata_type(0);
@@ -459,7 +462,7 @@ struct memory_desc_wrapper : public c_compatible {
     /** returns true if at least one dim is not known */
     bool has_runtime_dims() const {
         for (int d = 0; d < ndims(); ++d)
-            if (dims()[d] == DNNL_RUNTIME_DIM_VAL) return true;
+            if (is_runtime_value(dims()[d])) return true;
         return false;
     }
 
@@ -467,7 +470,7 @@ struct memory_desc_wrapper : public c_compatible {
     bool has_runtime_strides() const {
         if (!is_blocking_desc()) return false;
         for (int d = 0; d < ndims(); ++d)
-            if (blocking_desc().strides[d] == DNNL_RUNTIME_DIM_VAL) return true;
+            if (is_runtime_value(blocking_desc().strides[d])) return true;
         return false;
     }
 

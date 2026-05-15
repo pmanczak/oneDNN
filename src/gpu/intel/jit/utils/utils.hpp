@@ -708,6 +708,7 @@ static auto hw_names = nstl::to_array({
         make_enum_name(ngen::Core::XeHPC, "xehpc"),
         make_enum_name(ngen::Core::Xe2, "xe2"),
         make_enum_name(ngen::Core::Xe3, "xe3"),
+        make_enum_name(ngen::Core::Xe3p, "xe3p"),
 });
 GPU_DEFINE_PARSE_ENUM(ngen::HW, hw_names)
 
@@ -726,6 +727,9 @@ static auto product_family_names = nstl::to_array({
         make_enum_name(ngen::ProductFamily::PVC, "pvc"),
         make_enum_name(ngen::ProductFamily::GenericXe2, "xe2"),
         make_enum_name(ngen::ProductFamily::GenericXe3, "xe3"),
+        make_enum_name(ngen::ProductFamily::NVLP, "nvlp"),
+        make_enum_name(ngen::ProductFamily::CRI, "cri"),
+        make_enum_name(ngen::ProductFamily::GenericXe3p, "xe3p"),
 });
 GPU_DEFINE_PARSE_ENUM(ngen::ProductFamily, product_family_names)
 
@@ -1227,7 +1231,6 @@ void deserialize_from_hex(T &t, const std::string &s_hex) {
         GPU_HW_CASE(ngen::HW::hw); \
         break; \
     }
-
 #define GPU_HW_SWITCH(hw) \
     switch (hw) { \
         REG_XELP_ISA(GPU_HW_CASE_(XeLP)); \
@@ -1236,6 +1239,7 @@ void deserialize_from_hex(T &t, const std::string &s_hex) {
         REG_XEHPC_ISA(GPU_HW_CASE_(XeHPC)); \
         REG_XE2_ISA(GPU_HW_CASE_(Xe2)); \
         REG_XE3_ISA(GPU_HW_CASE_(Xe3)); \
+        REG_XE3P_ISA(GPU_HW_CASE_(Xe3p)); \
         default: gpu_assert(false) << "Unexpected GPU architecture"; \
     }
 

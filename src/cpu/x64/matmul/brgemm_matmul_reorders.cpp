@@ -80,10 +80,12 @@ status_t calculate_plain_transpose_blocks(dim_t &batch, dim_t &M, dim_t &K,
 
     memory_desc_t src_md_reduced, dst_md_reduced;
     VDISPATCH_REORDER_IC(memory_desc_reshape(src_md_reduced, src_md,
-                                 non_unit_dim, non_unit_dims),
+                                 non_unit_dim, non_unit_dims)
+                    == status::success,
             VERBOSE_UNSUPPORTED_TENSOR_LAYOUT, "src");
     VDISPATCH_REORDER_IC(memory_desc_reshape(dst_md_reduced, dst_md,
-                                 non_unit_dim, non_unit_dims),
+                                 non_unit_dim, non_unit_dims)
+                    == status::success,
             VERBOSE_UNSUPPORTED_TENSOR_LAYOUT, "dst");
 
     const memory_desc_wrapper id(src_md_reduced), od(dst_md_reduced);
@@ -446,6 +448,7 @@ status_t brgemm_matmul_copy_reorder_t::execute_body(
             ker_exec_ctx.current_N_blk
                     = is_N_tail ? kernel_conf.N_tail : kernel_conf.N_blk;
 
+            assert(!is_runtime_value(kernel_conf.s8s8_comp_b_str));
             const auto comp_offset = batch * kernel_conf.s8s8_comp_b_str
                     + n_blk_idx * kernel_conf.s8s8_comp_n_str;
 

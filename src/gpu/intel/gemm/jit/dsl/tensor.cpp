@@ -18,29 +18,113 @@
 #include "dsl/ir/ir.hpp"
 #include "dsl/ir/pass/simplify.hpp"
 
+#include <algorithm>
+
 GEMMSTONE_NAMESPACE_START
 namespace dsl {
 
 namespace layout {
-std::vector<block_t> normalize_blocks(
-        const std::vector<block_t> &blocks, bool remove_size_1_blocks) {
+
+std::vector<block_t> merge_blocks(const std::vector<block_t> &blocks) {
     if (blocks.empty()) return {};
+
     std::vector<block_t> res;
-
-    for (const block_t &block : blocks) {
-        if (remove_size_1_blocks && block.size == 1) continue;
-
-        auto can_merge = [&](const block_t &a, const block_t &b) {
+    for (const block_t &b : blocks) {
+        auto can_merge = [](const block_t &a, const block_t &b) {
             return a.idx == b.idx && a.stride * a.size == b.stride;
         };
-        if (!res.empty() && can_merge(res.back(), block)) {
-            res.back().size *= block.size;
+        if (!res.empty() && can_merge(res.back(), b)) {
+            res.back().size *= b.size;
         } else {
-            res.emplace_back(block);
+            res.emplace_back(b);
+        }
+    }
+    return res;
+}
+
+// Removes size-1 blocks and pre-merges stride-contiguous blocks sharing the
+// same index, regardless of their position in the input.
+std::vector<block_t> prepare_blocks(const std::vector<block_t> &blocks) {
+    std::vector<block_t> sorted;
+    sorted.reserve(blocks.size());
+    for (auto &b : blocks) {
+        if (b.size == 1) continue;
+        sorted.push_back(b);
+    }
+    if (sorted.size() <= 1) return sorted;
+
+    std::sort(sorted.begin(), sorted.end(),
+            [](const block_t &a, const block_t &b) {
+        if (a.idx != b.idx) return a.idx < b.idx;
+        if (a.stride.is_fixed() != b.stride.is_fixed())
+            return a.stride.is_fixed();
+        if (!a.stride.is_fixed()) return false;
+        return (int64_t)a.stride < (int64_t)b.stride;
+    });
+
+    std::vector<block_t> res;
+    for (const auto &b : sorted) {
+        if (!res.empty() && res.back().idx == b.idx
+                && res.back().stride.is_fixed() && b.stride.is_fixed()
+                && res.back().stride * res.back().size == b.stride) {
+            res.back().size *= b.size;
+        } else {
+            res.push_back(b);
+        }
+    }
+    return res;
+}
+
+std::vector<block_t> normalize_blocks(const std::vector<block_t> &_blocks) {
+    if (_blocks.empty()) return {};
+
+    auto blocks = prepare_blocks(_blocks);
+
+    // Normalize blocks order: select min-stride block and put all preceding
+    // same-index blocks before it.
+    std::vector<block_t> ordered;
+    ordered.reserve(blocks.size());
+    std::vector<bool> used(blocks.size(), false);
+    size_t remaining = blocks.size();
+
+    auto less = [&](const layout::block_t &a, const layout::block_t &b) {
+        auto prev_idx = (ordered.empty() ? idx_t() : ordered.back().idx);
+        auto &as = a.stride;
+        auto &bs = b.stride;
+        dsl_assert(!as.is_undefined() && !bs.is_undefined());
+        // Same stride -> prefer contiguous idx, otherwise order by idx.
+        if (as == bs) {
+            if (a.idx == b.idx) return false;
+            if (a.idx == prev_idx) return true;
+            if (b.idx == prev_idx) return false;
+            return a.idx < b.idx;
+        }
+        // Fixed stride < unknown stride.
+        if (as.is_unknown() != bs.is_unknown()) return bs.is_unknown();
+        // Use stride values otherwise.
+        return (int64_t)as < (int64_t)bs;
+    };
+
+    while (remaining > 0) {
+        // Find min-stride block.
+        size_t min_pos = blocks.size();
+        for (size_t i = 0; i < blocks.size(); i++) {
+            if (used[i]) continue;
+            if (min_pos == blocks.size() || less(blocks[i], blocks[min_pos]))
+                min_pos = i;
+        }
+
+        // Add all same-index blocks from start up to and including min_pos.
+        idx_t target_idx = blocks[min_pos].idx;
+        for (size_t i = 0; i <= min_pos; i++) {
+            if (used[i] || blocks[i].idx != target_idx) continue;
+            ordered.push_back(blocks[i]);
+            used[i] = true;
+            remaining--;
         }
     }
 
-    return res;
+    return ordered;
 }
 
 tile_iterator_t &tile_iterator_t::operator++() {
@@ -67,8 +151,8 @@ tile_iterator_t::tile_iterator_t(const layout_t &layout, const tile_t &tile) {
             return;
         }
         d_.emplace_back(b.idx, b.size, stride, tile_dim);
+        stride = d_.back().stride * d_.back().end;
         coord_[b.idx] = 0;
-        stride *= b.size;
     }
     if (!layout.is_empty() && layout.blocks().empty()) {
         auto idx = tile.is_empty() ? idx_t() : *tile.begin();

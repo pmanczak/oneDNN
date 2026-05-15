@@ -41,6 +41,7 @@
 #include "convolution_pd.hpp"
 #include "deconvolution_pd.hpp"
 #include "eltwise_pd.hpp"
+#include "gated_mlp_pd.hpp"
 #include "gemm_pd.hpp"
 #include "group_normalization_pd.hpp"
 #include "inner_product_pd.hpp"
@@ -636,7 +637,7 @@ namespace {
 int get_runtime_mask(const memory_desc_t *md) {
     int mask = 0;
     for (int d = md->ndims - 1; d >= 0; --d) {
-        mask += md->dims[d] == DNNL_RUNTIME_DIM_VAL ? 1 << d : 0;
+        mask += is_runtime_value(md->dims[d]) ? 1 << d : 0;
     }
     return mask;
 }
@@ -661,7 +662,9 @@ std::string get_arg(int arg) {
         case DNNL_ARG_SRC_1:
         case DNNL_ARG_SRC_2: s = "src"; break;
         case DNNL_ARG_DST: s = "dst"; break;
-        case DNNL_ARG_WEIGHTS: s = "wei"; break;
+        case DNNL_ARG_WEIGHTS: // DNNL_ARG_WEIGHTS_0
+        case DNNL_ARG_WEIGHTS_1:
+        case DNNL_ARG_WEIGHTS_2: s = "wei"; break;
         case DNNL_ARG_ATTR_POST_OP_DW | DNNL_ARG_DST:
             s = "attr_post_op_dw_dst";
             break;
@@ -1038,6 +1041,32 @@ std::string init_info_eltwise(const engine_t *e, const pd_t *pd) {
     ss << "alg:" << pd->desc()->alg_kind << " alpha:" << pd->desc()->alpha
        << " beta:" << pd->desc()->beta << ",";
     ss << md2dim_str(data_md);
+
+    return ss.str();
+}
+
+template <typename pd_t>
+std::string init_info_gated_mlp(const engine_t *e, const pd_t *pd) {
+    stringstream_t ss;
+    ss << e << "," << pd->kind() << "," << pd->name() << "," << prop_kind::undef
+       << ",";
+
+    ss << md2fmt_str("src", pd->arg_md(DNNL_ARG_SRC), format_kind::undef)
+       << " ";
+    ss << md2fmt_str(
+            "wei_gate", pd->arg_md(DNNL_ARG_WEIGHTS_GATE), format_kind::undef)
+       << " ";
+    ss << md2fmt_str(
+            "wei_up", pd->arg_md(DNNL_ARG_WEIGHTS_UP), format_kind::undef)
+       << " ";
+    ss << md2fmt_str(
+            "wei_down", pd->arg_md(DNNL_ARG_WEIGHTS_DOWN), format_kind::undef)
+       << " ";
+    ss << md2fmt_str("dst", pd->arg_md(DNNL_ARG_DST), format_kind::undef);
+
+    ss << "," << pd->attr() << ",";
+    ss << "alg:" << pd->activation() << ",";
+    ss << "mb" << pd->MB() << "ic" << pd->IC() << "oc" << pd->OC();
 
     return ss.str();
 }
@@ -1584,19 +1613,21 @@ std::string init_info_sum(const engine_t *e, const pd_t *pd) {
 template <typename pd_t>
 std::string init_info_sdpa(const engine_t *e, const pd_t *pd) {
     stringstream_t ss;
-    ss << e << "," << pd->kind() << "," << pd->name() << "," << prop_kind::undef
-       << ",";
+    ss << e << "," << pd->kind() << "," << pd->name() << ","
+       << pd->desc()->prop_kind << ",";
 
     const sdpa_desc_t *desc = pd->desc();
     ss << md2fmt_str(
-            "query", pd->qry_md(), pd->invariant_src_user_format_kind(0))
+            "query", desc->qry_md(), pd->invariant_src_user_format_kind(0))
        << " ";
-    ss << md2fmt_str("key", pd->key_md(), pd->invariant_src_user_format_kind(1))
+    ss << md2fmt_str(
+            "key", desc->key_md(), pd->invariant_src_user_format_kind(1))
        << " ";
-    ss << md2fmt_str("val", pd->val_md(), pd->invariant_src_user_format_kind(2))
+    ss << md2fmt_str(
+            "val", desc->val_md(), pd->invariant_src_user_format_kind(2))
        << " ";
     if (pd->with_attn_mask())
-        ss << md2fmt_str("msk", pd->attn_mask_md(),
+        ss << md2fmt_str("msk", desc->attn_mask_md(),
                 pd->invariant_src_user_format_kind(3))
            << " ";
     ss << md2fmt_str("dst", pd->dst_md(), pd->invariant_dst_user_format_kind())
@@ -1634,7 +1665,7 @@ std::string init_info_sdpa(const engine_t *e, const pd_t *pd) {
     delimiter = " ";
     ss << ",alg:" << desc->softmax_alg;
     if (pd->with_attn_mask()) {
-        auto *md = pd->attn_mask_md();
+        auto *md = desc->attn_mask_md();
         ss << delimiter << "msk:" << (md->dims[2] == 1 ? 1 : 2) << 'd';
     } else if (pd->with_causal_mask()) {
         ss << delimiter;
@@ -1649,15 +1680,15 @@ std::string init_info_sdpa(const engine_t *e, const pd_t *pd) {
             ss << "div:";
         else
             ss << "mul:";
-        ss << dnnl_dt2str(pd->scale_md()->data_type) << ":";
+        ss << dnnl_dt2str(desc->scale_md()->data_type) << ":";
         if (pd->with_host_scale())
             ss << "host";
         else
             ss << "device";
     }
 
-    ss << "," << md2dim_str(pd->qry_md()) << ":" << md2dim_str(pd->key_md())
-       << ":" << md2dim_str(pd->val_md());
+    ss << "," << md2dim_str(desc->qry_md()) << ":" << md2dim_str(desc->key_md())
+       << ":" << md2dim_str(desc->val_md());
 
     return ss.str();
 }
@@ -1794,6 +1825,7 @@ void pd_info_t::init(engine_t *engine, const primitive_desc_t *pd) {
             CASE(convolution);
             CASE(deconvolution);
             CASE(eltwise);
+            CASE(gated_mlp);
             CASE(gemm);
             CASE(group_normalization);
             CASE(inner_product);
