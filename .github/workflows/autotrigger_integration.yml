@@ -51,7 +51,7 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.pr_number }}" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
-          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
+          elif [ "${{ github.event_name }}" = "pull_request_review" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
             PR_NUMBER="${{ github.event.pull_request.number }}"
           else
             echo "Could not determine PR number; Trigger: ${{ github.event_name }}"
