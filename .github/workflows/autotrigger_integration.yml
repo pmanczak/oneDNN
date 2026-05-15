@@ -5,8 +5,6 @@
 #  - must be approved by reviewers
 #  - must not have a history of manual or automatic triggers (does not re-trigger) later than last file change
 #
-# TODO:
-#     = keep source path filtering AND/OR replace with checking labels AND/OR trigger for all PRs?
 
 name: "OV integration trigger"
 
@@ -64,21 +62,6 @@ jobs:
           echo "checkout_ref=$(echo "$PR_DATA" | jq -r .headRefOid)" >> "$GITHUB_OUTPUT"
           echo "pr_number=$(echo "$PR_DATA" | jq -r .number)" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout the code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.context.outputs.checkout_ref }}
-          fetch-depth: 0
-
-      - name: Check modified files
-        id: file_filter
-        uses: dorny/paths-filter@v3
-        with:
-          token: ${{ github.token }}
-          filters: |
-            relevant_files:
-              - 'src/gpu/**'
-
       - name: Check review approval status
         id: check_approval
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
@@ -108,7 +91,25 @@ jobs:
             echo "approved_at=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Checkout the code
+        if: steps.check_approval.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.context.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - name: Check modified files
+        if: steps.check_approval.outputs.skip == 'false'
+        id: file_filter
+        uses: dorny/paths-filter@v3
+        with:
+          token: ${{ github.token }}
+          filters: |
+            relevant_files:
+              - 'src/gpu/**'
+
       - name: Check if trigger comment is newer than last PR change
+        if: steps.check_approval.outputs.skip == 'false'
         id: trigger_freshness
         env:
           GH_TOKEN: ${{ github.token }}
