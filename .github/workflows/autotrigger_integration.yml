@@ -82,31 +82,88 @@ jobs:
             relevant_files:
               - 'src/gpu/**'
 
-      - name: Check if relevant tests were already triggered
-        if: steps.file_filter.outputs.relevant_files == 'true'
-        id: check_phrase
+      - name: Check review approval status
+        id: check_approval
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+        run: |
+          APPROVED_AT=$(
+            gh api \
+              repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews \
+              --paginate \
+              | jq -r '
+                  sort_by(.submitted_at)
+                  | group_by(.user.login)
+                  | map(last)
+                  | map(select(.state == "APPROVED" and .submitted_at != null))
+                  | map(.submitted_at)
+                  | sort
+                  | last // empty
+                '
+          )
+          if [ -n "$APPROVED_AT" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "approved_at=$APPROVED_AT" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "approved_at=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check if trigger comment is newer than last PR change
+        id: trigger_freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.context.outputs.pr_number }}
           TRIGGER_PHRASE: "make test_ov"
         run: |
-          COMMENTS=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments --template '{{range .comments}}{{.body}}{{"\n"}}{{end}}')
+          LAST_COMMENT_AT=$(
+            gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
+            | jq -r --arg phrase "$TRIGGER_PHRASE" '
+                [
+                  .comments[]
+                  | select(.body == $phrase or (.body | contains($phrase)))
+                  | .createdAt
+                ]
+                | sort
+                | last // empty
+              '
+          )
 
-          if echo "$COMMENTS" | grep -Fqw "$TRIGGER_PHRASE"; then
-            echo "Found $TRIGGER_PHRASE comment. No need to re-trigger; STOP."
+          LAST_COMMIT_AT=$(
+            gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json commits \
+            | jq -r '
+                [
+                  .commits[]
+                  | .committedDate
+                ]
+                | sort
+                | last // empty
+              '
+          )
+
+          echo "last_comment_at=$LAST_COMMENT_AT" >> "$GITHUB_OUTPUT"
+          echo "last_commit_at=$LAST_COMMIT_AT" >> "$GITHUB_OUTPUT"
+
+          echo "Latest trigger comment: $LAST_COMMENT_AT"
+          echo "Latest PR commit: $LAST_COMMIT_AT"
+
+          if [ -n "$LAST_COMMENT_AT" ] && [ -n "$LAST_COMMIT_AT" ] && [[ "$LAST_COMMENT_AT" > "$LAST_COMMIT_AT" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Trigger comment is newer than the last PR change; skip re-trigger."
           else
-            echo "Did not find the $TRIGGER_PHRASE comment."
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "No fresh trigger comment found; allow trigger."
           fi
 
       - name: Add a comment to trigger integration tests
         if: |
-          steps.file_filter.outputs.relevant_files == 'true' &&
-          steps.check_phrase.outputs.skip == 'false' &&
+          github.event_name == 'workflow_dispatch' || 
           (
-            github.event_name == 'workflow_dispatch' ||
-            github.event.review.state == 'approved'
+            steps.file_filter.outputs.relevant_files == 'true' &&
+            steps.trigger_freshness.outputs.skip == 'false' &&
+            steps.check_approval.outputs.skip == 'false'
           )
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
