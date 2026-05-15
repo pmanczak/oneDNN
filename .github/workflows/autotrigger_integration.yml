@@ -1,13 +1,11 @@
 #
 # Adds comments that trigger oneDNN - OpenVINO integration tests
 # For this action to be triggered, the PR:
-#  - needs to modify relevant files (GPU)
+#  - must modify relevant files (generally GPU)
 #  - must be approved by reviewers
-#  - must not have a history of manual or automatic triggers (does not re-trigger)
+#  - must not have a history of manual or automatic triggers (does not re-trigger) later than last file change
 #
 # TODO:
-#  - verify trigger conditions
-#     = re-runs might be useful in some cases; eg. files modified after last run
 #     = keep source path filtering AND/OR replace with checking labels AND/OR trigger for all PRs?
 
 name: "OV integration trigger"
