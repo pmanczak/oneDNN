@@ -170,16 +170,16 @@ int fill_data(data_kind_t kind, int exec_arg, const prb_t *prb,
 
     const auto &e_zp_src = prb->attr.zero_points.get(DNNL_ARG_SRC);
     const bool has_src_zp = !e_zp_src.is_def();
-    const int src_zp_mask
-            = attr_t::get_default_mask(e_zp_src.policy, prb->ndims);
+    const int src_zp_mask = prb->attr.zero_points.get_mask(
+            DNNL_ARG_SRC, dnnl_convolution, prb->ndims, prb->has_groups);
     // Apply src_zp for source tensor only.
     int src_zp = kind == SRC && has_src_zp && src_zp_mask == 0 ? e_zp_src.value
                                                                : 0;
 
     const auto &e_zp_wei = prb->attr.zero_points.get(DNNL_ARG_WEIGHTS);
     const bool has_wei_zp = !e_zp_wei.is_def();
-    const int wei_zp_mask
-            = attr_t::get_default_mask(e_zp_wei.policy, prb->ndims);
+    const int wei_zp_mask = prb->attr.zero_points.get_mask(
+            DNNL_ARG_WEIGHTS, dnnl_convolution, prb->ndims, prb->has_groups);
     // Apply wei_zp for weights tensor only.
     int wei_zp = kind == WEI && has_wei_zp && wei_zp_mask == 0 ? e_zp_wei.value
                                                                : 0;
@@ -441,8 +441,8 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {}
 
 void setup_cmp(compare::compare_t &cmp, const prb_t *prb, data_kind_t kind,
         const args_t &ref_args) {
-    const bool compare_with_norm = (prb->alg & WINO);
-    cmp.set_norm_validation_mode(compare_with_norm);
+    const bool allow_norm_check = (prb->alg & WINO);
+    cmp.set_allow_norm_check(allow_norm_check);
 
     float trh = 0.f;
     if (prb->alg & WINO) {

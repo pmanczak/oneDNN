@@ -865,6 +865,11 @@ bool matmul_amx_blocking_params_macro_t::set_blocking_parameters(
                 }
             }
 
+            if (best_n_h == 0) {
+                horizontal_not_possible = true;
+                return;
+            }
+
             if (rnd_up(n_per_thread, best_n_h * n_decomposition) * (nthr_n_ - 1)
                     >= (size_t)N) {
                 horizontal_not_possible = true;
@@ -904,6 +909,11 @@ bool matmul_amx_blocking_params_macro_t::set_blocking_parameters(
                         best_m_v = *it_m;
                     }
                 }
+            }
+
+            if (best_m_v == 0) {
+                vertical_not_possible = true;
+                return;
             }
 
             if (rnd_up(m_per_thread, best_m_v * m_decomposition) * (nthr_m_ - 1)
@@ -1187,8 +1197,13 @@ void matmul_amx_blocking_params_micro_t::find_best_blocking(
             float cur_score = current_blocking.get_blocking_scores();
             float bst_score = best_blocking.get_blocking_scores();
 
-            int m_chunks = div_up(bgmmc.M, m_blk * m_ch_sz);
-            int n_chunks = div_up(bgmmc.N, n_blk * n_ch_sz);
+            // TODO: Verify whether using a chunk count of 1 for runtime M and N is optimal for
+            // this heuristic. The previous implementation inadvertently used DNNL_RUNTIME_DIM_VAL
+            // for M and N in arithmetic, producing incorrect work_amount values.
+            int m_chunks
+                    = bgmmc.is_runtime_M ? 1 : div_up(bgmmc.M, m_blk * m_ch_sz);
+            int n_chunks
+                    = bgmmc.is_runtime_N ? 1 : div_up(bgmmc.N, n_blk * n_ch_sz);
             int work_amount = bgmmc.batch * m_chunks * n_chunks;
 
             bool skip_config = work_amount < nthr_bmn * 3

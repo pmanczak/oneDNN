@@ -19,6 +19,7 @@
 #include "common/primitive_attr_quant.hpp"
 #include "gpu/intel/gemm/exec_types.hpp"
 #include "gpu/intel/gemm/jit/gen_kernel.hpp"
+#include "gpu/intel/gemm/utils.hpp"
 #include "gpu/intel/jit/eltwise_injector.hpp"
 #include "gpu/intel/jit/utils/type_bridge.hpp"
 #include "gpu/intel/utils.hpp"
@@ -46,16 +47,27 @@ int quant_entry_ndims(
         if (qmd.dims[i] > 1) { count++; }
     }
 
+    if (count == 0) return 0;
+
     // for gemmstone, 1D quantization implies a full column vector
     // (i.e. not on the K dimension). If quantization varies over K,
     // we have to send these as 2D
     if (k_idx >= 0 && count == 1 && qmd.dims[k_idx] > 1) return 2;
 
+    // If M/N quantization requires broadcast it is unsupported
+    // by post-ops and must be submitted as 2D.
+    int gcount = 0;
+    for (int i = 0; i < 2; ++i) {
+        if (entry.get_group(i) > 1) { gcount++; }
+    }
+
+    if (gcount == 2) return 2;
+
     return count;
 }
 } // anonymous namespace
 
-status_t pd_t::init_post_ops() {
+status_t pd_t::init_post_ops(impl::engine_t *engine) {
     using namespace primitive_kind;
     using namespace alg_kind;
     using namespace data_type;
@@ -102,11 +114,11 @@ status_t pd_t::init_post_ops() {
                 ok &= prelu_count <= 1;
                 non_scale_po_ = true;
                 break;
-            default: return status::unimplemented;
+            default: VDISPATCH_GEMM(false, VERBOSE_UNSUPPORTED_POSTOP);
         }
     }
 
-    if (!ok) return status::unimplemented;
+    VDISPATCH_GEMM(ok, VERBOSE_UNSUPPORTED_POSTOP);
 
     // If scales are present, convert them and any bias to binary post-ops.
     //   Exception: 2D scales.
@@ -120,29 +132,37 @@ status_t pd_t::init_post_ops() {
                     || !b_scales.has_default_values()
                     || !attr()->zero_points_.has_default_values(DNNL_ARG_C));
     if (bias_via_binary_) {
-        CHECK(post_ops_.prepend_binary(binary_add, &d->bias_desc));
+        VDISPATCH_GEMM_SC(post_ops_.prepend_binary(binary_add, &d->bias_desc),
+                "%s: bias via binary post-op", VERBOSE_UNSUPPORTED_POSTOP);
         binary_srcs_.insert(
                 binary_srcs_.begin(), binary_src_t {binary_src_t::bias, 0});
     }
     non_scale_po_ |= bias_via_binary_;
 
     auto maybe_convert_scales_to_postop
-            = [this](const memory_desc_t &scale_md, int arg, data_type_t dt,
-                      bool mx, bool &converted) -> status_t {
+            = [this, engine](const memory_desc_t &scale_md, int arg,
+                      int scale_ndims, bool mx, bool &converted) -> status_t {
         auto ndims = desc()->c_desc.ndims;
         // Scales on A/B can be converted to postops if
-        // the scales md has K=1
+        // the scales md has K=1 and M/N is not bcast.
         converted = false;
+        if (scale_ndims > 1) return status::success;
         int inner_dim = (arg == DNNL_ARG_A ? ndims - 2 : ndims - 1);
         bool convert = (scale_md.dims[inner_dim] <= 1) || (arg == DNNL_ARG_C);
         convert &= !mx;
         if (convert) {
             if (arg == DNNL_ARG_C) {
-                CHECK(post_ops_.append_binary(binary_div, &scale_md));
+                VDISPATCH_GEMM_SC(
+                        post_ops_.append_binary(binary_div, &scale_md),
+                        "%s: %s scales via binary post-op",
+                        VERBOSE_UNSUPPORTED_POSTOP, arg2str(arg).c_str());
                 binary_srcs_.push_back(
                         binary_src_t {binary_src_t::scales, arg});
             } else {
-                CHECK(post_ops_.prepend_binary(binary_mul, &scale_md));
+                VDISPATCH_GEMM_SC(
+                        post_ops_.prepend_binary(binary_mul, &scale_md),
+                        "%s: %s scales via binary post-op",
+                        VERBOSE_UNSUPPORTED_POSTOP, arg2str(arg).c_str());
                 binary_srcs_.insert(binary_srcs_.begin(),
                         binary_src_t {binary_src_t::scales, arg});
             }
@@ -155,14 +175,14 @@ status_t pd_t::init_post_ops() {
         // Host scalar scale will be converted to Alpha
         bool converted;
         CHECK(maybe_convert_scales_to_postop(a_scale_md_, DNNL_ARG_A,
-                a_scales.get_data_type(), a_scales.is_mx(), converted));
+                a_quant.scale_ndims, a_scales.is_mx(), converted));
         if (converted) a_quant.scale_ndims = -1;
     }
 
     if (!b_scales.has_default_values() && !b_scales.is_host_scalar()) {
         bool converted;
         CHECK(maybe_convert_scales_to_postop(b_scale_md_, DNNL_ARG_B,
-                b_scales.get_data_type(), b_scales.is_mx(), converted));
+                b_quant.scale_ndims, b_scales.is_mx(), converted));
         if (converted) b_quant.scale_ndims = -1;
     }
 
@@ -171,7 +191,7 @@ status_t pd_t::init_post_ops() {
     if (!c_scales.has_default_values() && try_c_scale) {
         bool converted;
         CHECK(maybe_convert_scales_to_postop(c_scale_md_, DNNL_ARG_C,
-                c_scales.get_data_type(), c_scales.is_mx(), converted));
+                c_quant.scale_ndims, c_scales.is_mx(), converted));
         // Conversion of dst scales to post ops is currently supported for all
         // cases supported in the library.
         gpu_assert(converted || c_scales.is_mx())
@@ -210,7 +230,7 @@ bool pd_t::quant_enabled() {
     return wei_decomp() || dy_quant_enabled();
 }
 
-status_t pd_t::init_attrs() {
+status_t pd_t::init_attrs(impl::engine_t *engine) {
     wei_decomp_ = wei_decomp();
     dy_quant_enabled_ = dy_quant_enabled();
     quant_enabled_ = quant_enabled();
@@ -235,14 +255,22 @@ status_t pd_t::init_attrs() {
     cmask_c_ = c_zps.get_mask();
 
     // Swap descriptors to follow column major format
-    CHECK(a_zps.get_md(a_zp_md_, d->b_desc));
-    CHECK(b_zps.get_md(b_zp_md_, d->a_desc));
-    CHECK(c_zps.get_md(c_zp_md_, d->c_desc));
-    CHECK(a_gs.get_md(a_gs_md_, d->b_desc));
-    CHECK(b_gs.get_md(b_gs_md_, d->a_desc));
-    CHECK(a_scales.get_md(a_scale_md_, desc_.b_desc));
-    CHECK(b_scales.get_md(b_scale_md_, desc_.a_desc));
-    CHECK(c_scales.get_md(c_scale_md_, desc_.c_desc));
+    VDISPATCH_GEMM_SC(a_zps.get_md(a_zp_md_, d->b_desc),
+            VERBOSE_DESC_CREATION_FAIL, "A zero points");
+    VDISPATCH_GEMM_SC(b_zps.get_md(b_zp_md_, d->a_desc),
+            VERBOSE_DESC_CREATION_FAIL, "B zero points");
+    VDISPATCH_GEMM_SC(c_zps.get_md(c_zp_md_, d->c_desc),
+            VERBOSE_DESC_CREATION_FAIL, "C zero points");
+    VDISPATCH_GEMM_SC(a_gs.get_md(a_gs_md_, d->b_desc),
+            VERBOSE_DESC_CREATION_FAIL, "A group sums");
+    VDISPATCH_GEMM_SC(b_gs.get_md(b_gs_md_, d->a_desc),
+            VERBOSE_DESC_CREATION_FAIL, "B group sums");
+    VDISPATCH_GEMM_SC(a_scales.get_md(a_scale_md_, desc_.b_desc),
+            VERBOSE_DESC_CREATION_FAIL, "A scales");
+    VDISPATCH_GEMM_SC(b_scales.get_md(b_scale_md_, desc_.a_desc),
+            VERBOSE_DESC_CREATION_FAIL, "B scales");
+    VDISPATCH_GEMM_SC(c_scales.get_md(c_scale_md_, desc_.c_desc),
+            VERBOSE_DESC_CREATION_FAIL, "C scales");
 
     auto ndims = d->c_desc.ndims;
     a_quant.zp_ndims = quant_entry_ndims(a_zps, a_zp_md_, ndims - 2);
@@ -260,43 +288,41 @@ status_t pd_t::init_attrs() {
     a_quant.force_gs = !a_gs.has_default_values();
     a_quant.zp_host_scalar = a_zp_host_scalar();
     // XXX, gemmstone support: if multiple grouped quantization attributes exist
-    // for one matrix, they must have the same group size
-    const auto &set_a_groups
-            = [](quant_params &quant, const quant_entry_t &entry) -> status_t {
-        int k_grp = entry.get_group(0);
-        int m_grp = entry.get_group(1);
-        if (quant.group_k > 0 && quant.group_k != k_grp)
-            return status::unimplemented;
-        quant.group_k = k_grp;
-        if (quant.group_m > 0 && quant.group_m != m_grp)
-            return status::unimplemented;
-        quant.group_m = m_grp;
+    // for one matrix, they must have the same group size (default/unset is 0)
+    const auto &set_if_consistent
+            = [this, engine](int &quant_dim, int new_dim, int arg) -> status_t {
+        VDISPATCH_GEMM(utils::one_of(quant_dim, 0, new_dim),
+                "%s: %s quantization attrs with different group sizes",
+                VERBOSE_UNSUPPORTED_ATTR, arg2str(arg).c_str());
+        quant_dim = new_dim;
         return status::success;
     };
-    if (!a_zps.has_default_groups()) CHECK(set_a_groups(a_quant, a_zps));
-    if (!a_gs.has_default_groups()) CHECK(set_a_groups(a_quant, a_gs));
-    if (!a_scales.has_default_groups()) CHECK(set_a_groups(a_quant, a_scales));
+    const auto &set_a_groups = [&set_if_consistent](quant_params &quant,
+                                       const quant_entry_t &entry) -> status_t {
+        if (entry.has_default_groups()) return status::success;
+        CHECK(set_if_consistent(quant.group_k, entry.get_group(0), DNNL_ARG_A));
+        CHECK(set_if_consistent(quant.group_m, entry.get_group(1), DNNL_ARG_A));
+        return status::success;
+    };
+    CHECK(set_a_groups(a_quant, a_zps));
+    CHECK(set_a_groups(a_quant, a_gs));
+    CHECK(set_a_groups(a_quant, a_scales));
 
     b_quant.scales_type = b_scales.get_data_type();
     b_quant.zp_type = b_zps.get_data_type();
     b_quant.gs_type = b_gs.get_data_type();
     b_quant.force_gs = !b_gs.has_default_values();
     b_quant.zp_host_scalar = b_zp_host_scalar();
-    const auto &set_b_groups
-            = [](quant_params &quant, const quant_entry_t &entry) -> status_t {
-        int n_grp = entry.get_group(0);
-        int k_grp = entry.get_group(1);
-        if (quant.group_n > 0 && quant.group_n != n_grp)
-            return status::unimplemented;
-        quant.group_n = n_grp;
-        if (quant.group_k > 0 && quant.group_k != k_grp)
-            return status::unimplemented;
-        quant.group_k = k_grp;
+    const auto &set_b_groups = [&set_if_consistent](quant_params &quant,
+                                       const quant_entry_t &entry) -> status_t {
+        if (entry.has_default_groups()) return status::success;
+        CHECK(set_if_consistent(quant.group_n, entry.get_group(0), DNNL_ARG_B));
+        CHECK(set_if_consistent(quant.group_k, entry.get_group(1), DNNL_ARG_B));
         return status::success;
     };
-    if (!b_zps.has_default_groups()) CHECK(set_b_groups(b_quant, b_zps));
-    if (!b_gs.has_default_groups()) CHECK(set_b_groups(b_quant, b_gs));
-    if (!b_scales.has_default_groups()) CHECK(set_b_groups(b_quant, b_scales));
+    CHECK(set_b_groups(b_quant, b_zps));
+    CHECK(set_b_groups(b_quant, b_gs));
+    CHECK(set_b_groups(b_quant, b_scales));
 
     c_quant.scales_type = c_scales.get_data_type();
     c_quant.zp_type = c_zps.get_data_type();
@@ -310,16 +336,13 @@ status_t pd_t::init_attrs() {
     return status::success;
 }
 
-bool pd_t::zp_ok() {
+status_t pd_t::zp_ok(impl::engine_t *engine) {
     using namespace data_type;
     auto &attr_zps = attr()->zero_points_;
-    if (attr_zps.has_default_values()) return true;
+    if (attr_zps.has_default_values()) return status::success;
     auto &a_zps = attr_zps.get(DNNL_ARG_A);
     auto &b_zps = attr_zps.get(DNNL_ARG_B);
     auto &c_zps = attr_zps.get(DNNL_ARG_C);
-
-    // INT4 ZPs on SRC do not expand the range in a meaningful way, skipping
-    if (utils::one_of(b_zps.get_data_type(), s4, u4)) return false;
 
     int ndims = desc()->a_desc.ndims;
     const bool a_int4 = utils::one_of(desc()->a_type(), s4, u4);
@@ -330,104 +353,145 @@ bool pd_t::zp_ok() {
     if (!a_zps.has_default_values()) {
         // Groups determine supported masks.
         if (!a_zps.has_default_groups()) {
-            if (!valid_2d_mask(cmask_a_, ndims, weights_upconversion))
-                return false;
+            VDISPATCH_GEMM(valid_2d_mask(cmask_a_, ndims, weights_upconversion),
+                    "%s: unsupported A mask", VERBOSE_UNSUPPORTED_ZP_CFG);
             const auto a_q2d_group_n = a_zps.get_group(1);
             // Non-trivial N group unsupported.
-            if (a_q2d_group_n != 1) return false;
+            VDISPATCH_GEMM(a_q2d_group_n == 1,
+                    "%s: Grouped N dimension on A matrix",
+                    VERBOSE_UNSUPPORTED_ZP_CFG);
             // Zero points with non-trivial groups only supported with
             // precomputed reductions or when target tensor is being dequantized.
-            if (attr()->precomputed_reductions_.has_default_values(DNNL_ARG_B)
-                    && dy_quant_enabled_ && b_int4 && !a_int4 && a_zp_2d())
-                return false;
+            bool has_prB = !attr()->precomputed_reductions_.has_default_values(
+                    DNNL_ARG_B);
+            // TODO: Re-examine this condition
+            bool is_dequantized = !dy_quant_enabled_ || !b_int4 || a_int4;
+            VDISPATCH_GEMM(IMPLICATION(a_zp_2d(), is_dequantized || has_prB),
+                    "%s: Nontrivial groups on A matrix, and no precomputed "
+                    "reductions or dequantization",
+                    VERBOSE_UNSUPPORTED_ZP_CFG);
         } else {
-            if (!utils::one_of(cmask_a_, 0, mask_per_oc, mask_per_ic))
-                return false;
+            VDISPATCH_GEMM(utils::one_of(cmask_a_, 0, mask_per_oc, mask_per_ic),
+                    "%s: unsupported A mask", VERBOSE_UNSUPPORTED_ZP_CFG);
             // Weights zp can only be performantly enabled during upconversion
             // for cases that perform decompression.
-            if (!wei_decomp_ && !a_int4 && a_scales_2d()) return false;
+            VDISPATCH_GEMM(IMPLICATION(a_scales_2d(),
+                                   !(b_int4 && !wei_decomp_ && !a_int4)),
+                    "%s: 2D scales on A matrix, but no weights "
+                    "decompression",
+                    VERBOSE_UNSUPPORTED_ZP_CFG);
         }
     }
 
     if (!b_zps.has_default_values()) {
+        // INT4 ZPs on SRC do not expand the range in a meaningful way, skipping
+        VDISPATCH_GEMM(!utils::one_of(b_zps.get_data_type(), s4, u4),
+                VERBOSE_UNSUPPORTED_ZP_CFG);
+
         // Groups determine supported masks.
         if (!b_zps.has_default_groups()) {
-            if (!valid_2d_mask(cmask_b_, ndims, false)) return false;
+            VDISPATCH_GEMM(valid_2d_mask(cmask_b_, ndims, false),
+                    "%s: unsupported B mask", VERBOSE_UNSUPPORTED_ZP_CFG);
             const auto b_q2d_group_n = b_zps.get_group(0);
             // Non-trivial M group unsupported.
-            if (!utils::one_of(b_q2d_group_n, 1, desc()->n())) return false;
+            VDISPATCH_GEMM(utils::one_of(b_q2d_group_n, 1, desc()->n()),
+                    "%s: Nontrivial N groups on B matrix",
+                    VERBOSE_UNSUPPORTED_ZP_CFG);
             // Zero points with non-trivial groups only supported
             // when target tensor is being dequantized.
-            if (dy_quant_enabled_ && a_int4 && !b_int4 && b_zp_2d())
-                return false;
+            // TODO: Re-examine this condition
+            bool is_dequantized = !dy_quant_enabled_ || !a_int4 || b_int4;
+            VDISPATCH_GEMM(IMPLICATION(b_zp_2d(), is_dequantized),
+                    "%s: Grouped B zero points, and no dequantization",
+                    VERBOSE_UNSUPPORTED_ZP_CFG);
         } else {
-            if (!utils::one_of(
-                        cmask_b_, 0, mask_scalar, mask_per_oc | mask_per_ic))
-                return false;
+            VDISPATCH_GEMM(utils::one_of(cmask_b_, 0, mask_scalar,
+                                   mask_per_oc | mask_per_ic),
+                    "%s: unsupported B mask", VERBOSE_UNSUPPORTED_ZP_CFG);
         }
     }
 
     if (!attr_zps.has_default_values(DNNL_ARG_C)) {
-        if (!c_zps.is_host_scalar()
-                && !utils::one_of(cmask_c_, 0, mask_scalar, mask_per_oc))
-            return false;
+        VDISPATCH_GEMM(
+                IMPLICATION(!c_zps.is_host_scalar(),
+                        utils::one_of(cmask_c_, 0, mask_scalar, mask_per_oc)),
+                "%s: unsupported C mask", VERBOSE_UNSUPPORTED_ZP_CFG);
     }
 
-    return true;
+    return status::success;
 }
 
-bool pd_t::gs_ok() {
+status_t pd_t::gs_ok(impl::engine_t *engine) {
     auto &attr_gs = attr()->precomputed_reductions_;
-    if (attr_gs.has_default_values()) return true;
+    if (attr_gs.has_default_values()) return status::success;
 
-    if (!attr_gs.has_default_values(DNNL_ARG_DST)) { return false; }
+    VDISPATCH_GEMM(attr_gs.has_default_values(DNNL_ARG_DST),
+            VERBOSE_UNSUPPORTED_PR_CFG);
 
     bool with_a_group_sums_ = !attr_gs.has_default_values(DNNL_ARG_A);
     bool with_b_group_sums_ = !attr_gs.has_default_values(DNNL_ARG_B);
 
-    if ((attr_gs.get_data_type(DNNL_ARG_A) != data_type::s32)
-            && with_a_group_sums_) {
-        return false;
-    }
-    if ((attr_gs.get_data_type(DNNL_ARG_B) != data_type::s32)
-            && with_b_group_sums_) {
-        return false;
-    }
+    VDISPATCH_GEMM(IMPLICATION(with_a_group_sums_,
+                           attr_gs.get_data_type(DNNL_ARG_A) == data_type::s32),
+            VERBOSE_UNSUPPORTED_DT_CFG);
+    VDISPATCH_GEMM(IMPLICATION(with_b_group_sums_,
+                           attr_gs.get_data_type(DNNL_ARG_B) == data_type::s32),
+            VERBOSE_UNSUPPORTED_DT_CFG);
 
-    return true;
+    return status::success;
 }
 
-bool pd_t::scales_ok() {
+status_t pd_t::scales_ok(impl::engine_t *engine) {
     const auto &scales = attr()->scales_;
-    if (scales.has_default_values()) return true;
+    if (scales.has_default_values()) return status::success;
     int ndims = desc()->a_desc.ndims;
     using namespace data_type;
 
-    for (auto s : {DNNL_ARG_A, DNNL_ARG_B, DNNL_ARG_C}) {
+    for (auto s : {DNNL_ARG_A, DNNL_ARG_B}) {
         if (scales.has_default_values(s) || scales.get(s).is_host_scalar())
             continue;
         const auto &x_scales = scales.get(s);
 
         auto mask = x_scales.get_mask();
-        if (!(utils::one_of(mask, 0, mask_scalar, mask_per_oc, mask_per_ic)
-                    || (utils::one_of(s, DNNL_ARG_A, DNNL_ARG_B)
-                            && !x_scales.has_default_groups()
-                            && valid_2d_mask(mask, ndims))
-                    || (s == DNNL_ARG_C && !x_scales.has_default_groups()
-                            && with_mx_scale() && valid_2d_mask(mask, ndims))))
-            return false;
-
-        if (!x_scales.has_default_groups()) {
-            // Dynamic Dst Quant only supported with `1x32` groups.
-            if (s == DNNL_ARG_C && with_mx_scale() && x_scales.get_group(0) != 1
-                    && x_scales.get_group(1) != 32)
-                return false;
-            // Other dynamic quant unsupported
-            if (x_scales.is_dynamic()) return false;
-        }
+        bool supportedMask
+                = utils::one_of(mask, 0, mask_scalar, mask_per_oc, mask_per_ic)
+                || (!x_scales.has_default_groups()
+                        && valid_2d_mask(mask, ndims));
+        VDISPATCH_GEMM(supportedMask, "%s: unsupported A/B mask",
+                VERBOSE_UNSUPPORTED_SCALES_CFG);
     }
 
-    return true;
+    const auto &dst_scales = scales.get(DNNL_ARG_C);
+    if (!dst_scales.has_default_values() && !dst_scales.is_host_scalar()) {
+        auto mask = dst_scales.get_mask();
+        bool supportedMask
+                = utils::one_of(mask, 0, mask_scalar, mask_per_oc, mask_per_ic)
+                || (!dst_scales.has_default_groups() && with_mx_scale()
+                        && valid_2d_mask(mask, ndims));
+        VDISPATCH_GEMM(supportedMask, "%s: unsupported C mask",
+                VERBOSE_UNSUPPORTED_SCALES_CFG);
+    }
+
+    if (!dst_scales.has_default_values() && with_mx_scale()) {
+        // Dynamic Dst Quant only supported with `1x32` groups.
+        VDISPATCH_GEMM(dst_scales.get_group(0) == 1
+                        && dst_scales.get_group(1) == 32
+                        && arch_ >= compute::gpu_arch_t::xe_hpc,
+                "%s: unsupported mx_scale groups",
+                VERBOSE_UNSUPPORTED_SCALES_CFG);
+
+        // M+N dimensions must have trivial strides for Dynamic Dst Quant
+        auto md = &desc()->c_desc;
+        auto strides = md->format_desc.blocking.strides;
+        VDISPATCH_GEMM(strides[md->ndims - 1] == 1,
+                "%s: unsupported mx_scale strides",
+                VERBOSE_UNSUPPORTED_SCALES_CFG);
+        VDISPATCH_GEMM(strides[md->ndims - 2] == md->dims[md->ndims - 1],
+                "%s: unsupported mx_scale strides",
+                VERBOSE_UNSUPPORTED_SCALES_CFG);
+    }
+
+    return status::success;
 }
 
 bool pd_t::valid_2d_mask(int mask, int ndims, bool per_tensor_ok) {
@@ -499,7 +563,7 @@ status_t pd_t::init_GEMMProblem(
     using namespace gemmstone;
     problem = {};
 
-    auto hw = convert_dnnl_arch_to_ngen(engine->device_info()->gpu_arch());
+    problem.product = get_ngen_product(*engine->device_info());
     bool has_systolic
             = engine->mayiuse(compute::device_ext_t::
                               intel_subgroup_matrix_multiply_accumulate)
@@ -622,33 +686,36 @@ status_t pd_t::init_GEMMProblem(
         problem.bOffset = ABOffset::Calc;
     problem.aoPtrDims = a_quant.zp_host_scalar ? -1 : a_quant.zp_ndims;
     problem.boPtrDims = b_quant.zp_host_scalar ? -1 : b_quant.zp_ndims;
-    problem.AO.layout = MatrixLayout::N;
-    problem.BO.layout
-            = (problem.bOffset2D()) ? MatrixLayout::N : MatrixLayout::T;
+    problem.asPtrDims = a_quant.scale_ndims;
+    problem.bsPtrDims = b_quant.scale_ndims;
+
+    problem.AO.layout = problem.BO.layout = MatrixLayout::N;
     problem.AO.crosspack = problem.BO.crosspack = 1;
     problem.AO.packSize = problem.BO.packSize = 0;
     problem.A_scale = problem.Ag = problem.AO;
     problem.B_scale = problem.Bg = problem.BO;
+
+    // 1D tensors can be treated as either transposition - choose the one that
+    // allows block loads (i.e. A -> N and B -> T)
+    if (!problem.bOffset2D()) problem.BO.layout = MatrixLayout::T;
+    if (!problem.bScale2D()) problem.B_scale.layout = MatrixLayout::T;
+    if (b_quant.gs_ndims < 2) problem.Bg.layout = MatrixLayout::T;
+
     if (a_quant.zp_type != data_type::undef)
         problem.AO.setAlignment(int(types::data_type_size(a_quant.zp_type)));
     if (b_quant.zp_type != data_type::undef)
         problem.BO.setAlignment(int(types::data_type_size(b_quant.zp_type)));
-
-    problem.asPtrDims = a_quant.scale_ndims;
-    problem.bsPtrDims = b_quant.scale_ndims;
     problem.aqGroupK = a_quant.group_k;
     problem.bqGroupK = b_quant.group_k;
     problem.aqGroupM = a_quant.group_m;
     problem.bqGroupN = b_quant.group_n;
     if (a_quant.scales_type != data_type::undef) {
         problem.Ta_scale = convert_dnnl_to_kernel_type(a_quant.scales_type);
-        problem.A_scale.layout = swap_ab() ? MatrixLayout::T : MatrixLayout::N;
         problem.A_scale.setAlignment(
                 int(types::data_type_size(a_quant.scales_type)));
     }
     if (b_quant.scales_type != data_type::undef) {
         problem.Tb_scale = convert_dnnl_to_kernel_type(b_quant.scales_type);
-        problem.B_scale.layout = swap_ab() ? MatrixLayout::T : MatrixLayout::N;
         problem.B_scale.setAlignment(
                 int(types::data_type_size(b_quant.scales_type)));
     }
@@ -678,7 +745,11 @@ status_t pd_t::init_GEMMProblem(
             gpu_post_ops, post_ops_, dst_md(), get_post_op_specializations()));
 
     CHECK(transfer_post_ops(problem, std::move(gpu_post_ops)));
-    if (swap_ab()) problem.postOps.transpose();
+    if (swap_ab()) {
+        problem.postOps.transpose();
+        for (auto &b : problem.binary)
+            b.transpose();
+    }
 
     auto reduce_ab = sum_ab();
     if (c_offset || bias || reduce_ab != sum_ab::sum_none) {
@@ -700,14 +771,13 @@ status_t pd_t::init_GEMMProblem(
     problem.postOps.cStochasticRound = dst_sround;
 
     if (problem.needsAGroupSums() || problem.needsBGroupSums())
-        problem.autoTypeConversions(hw, has_systolic);
+        problem.autoTypeConversions(has_systolic);
 
     if (problem.needsAGroupSums()) {
         data_type_t gs_dt = a_quant.gs_type == data_type::undef
                 ? data_type::s32
                 : a_quant.gs_type;
         problem.Tag = convert_dnnl_to_kernel_type(gs_dt);
-        problem.Ag.layout = MatrixLayout::N;
         problem.Ag.setAlignment(problem.Tag.paddedSize());
         if (problem.bqGroupK == 0) problem.bqGroupK = problem.aqGroupK;
         if (problem.aqGroupK == 0) problem.aqGroupK = problem.bqGroupK;
@@ -717,11 +787,28 @@ status_t pd_t::init_GEMMProblem(
                 ? data_type::s32
                 : b_quant.gs_type;
         problem.Tbg = convert_dnnl_to_kernel_type(gs_dt);
-        problem.Bg.layout = MatrixLayout::N;
         problem.Bg.setAlignment(problem.Tbg.paddedSize());
         if (problem.aqGroupK == 0) problem.aqGroupK = problem.bqGroupK;
         if (problem.bqGroupK == 0) problem.bqGroupK = problem.aqGroupK;
     }
+    // Disable bdpas with unsupported k dim.
+    // TODO: Enable 2D block, masking scale loads.
+    if (problem.nativeBDPAS()) {
+        if (((!problem.Ta.isF4() || !problem.Tb.isF4()) || k % 64 == 0))
+            problem.bdpasEnabled = true;
+    }
+
+    if (swap_ab_) {
+        // problem.A and problem.B are already swapped + transposed
+        // TODO: use problem.transpose() instead
+        problem.AO.transpose();
+        problem.BO.transpose();
+        problem.A_scale.transpose();
+        problem.B_scale.transpose();
+        problem.Ag.transpose();
+        problem.Bg.transpose();
+    }
+
     return status::success;
 }
 

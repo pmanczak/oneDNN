@@ -1,7 +1,7 @@
 /*******************************************************************************
 * Copyright 2019 Intel Corporation
 * Copyright 2021-2024 FUJITSU LIMITED
-* Copyright 2025 Arm Ltd. and affiliates
+* Copyright 2025-2026 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -144,12 +144,15 @@ struct jit_uni_eltwise_injector_t {
     void compute_vector(size_t idx) { compute_vector_range(idx, idx + 1); }
     void prepare_table(bool gen_table = true);
     void load_table_addr() { h->adr(x_table, l_table); }
+    void set_input_range(float min_value, float max_value);
 
 private:
     const alg_kind_t alg_;
     const float alpha_;
     const float beta_;
     const float scale_;
+    float max_input_ = INFINITY;
+    float min_input_ = -INFINITY;
 
     jit_generator_t *const h;
 
@@ -212,6 +215,8 @@ private:
             const injector_utils::vmm_index_set_iterator_t start_idx_it);
     void injector_postamble();
     void assign_regs();
+    void store_preserved_vec(size_t slot, size_t vmm_idx);
+    void load_preserved_vec(size_t slot, size_t vmm_idx);
     void set_coef_to_regs();
     void compute_cmp_mask(
             const TRegS &vmm_src, const TRegS &vmm_cmpare, int cmp_predicate);
@@ -220,6 +225,8 @@ private:
 
     size_t get_vec_len();
     void exp_compute_vector_fwd(const TRegS &vmm_src);
+    void exp_compute_vector_fwd(
+            const TRegS &vmm_src, float min_input, float max_input);
     void relu_compute_vector_fwd(const TRegS &vmm_src);
     void relu_zero_ns_compute_vector_fwd(const TReg &vmm_src);
     void elu_compute_vector_fwd(const TRegS &vmm_src);
@@ -318,6 +325,13 @@ private:
         gelu_erf_one_over_sqrt_two, // 1.f / sqrtf(2.f)
         gelu_erf_one_over_sqrt_pi, // 1.f / sqrtf(pi) = 0.564190f
         gelu_erf_pol, // see correspondent table for float values
+        gelu_erf_lut_max,
+        gelu_erf_lut_third,
+        gelu_erf_lut_bias,
+        gelu_erf_lut_max_index,
+        gelu_erf_lut, // ERF LUT: [erf(r), scale(r)], 513 pairs
+        gelu_erf_lut_erf, // ERF LUT: erf(r), 513 entries
+        gelu_erf_lut_scale, // ERF LUT: scale(r), 513 entries
         log_minus_inf, // -inf
         log_qnan, // qnan
         log_mantissa_mask, // gets mantissa bits

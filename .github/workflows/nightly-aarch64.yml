@@ -108,7 +108,7 @@ jobs:
           python-version: '3.10'
       
       - name: Download oneDNN
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: onednn-nightly
           path: oneDNN_pkg
@@ -131,7 +131,7 @@ jobs:
       - name: Find last successful run
         if: failure()
         id: get-stable-cache
-        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           key: latest-nightly-success-sha
           path: ${{ github.workspace }}/oneDNN/.github/automation/aarch64/stable.sha
@@ -184,7 +184,7 @@ jobs:
         run: echo "$(git rev-parse --short HEAD)" > .github/automation/aarch64/stable.sha
 
       - name: Save hash
-        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           key: latest-nightly-success-sha
           path: ${{ github.workspace }}/oneDNN/.github/automation/aarch64/stable.sha

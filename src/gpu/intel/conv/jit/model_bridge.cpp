@@ -59,6 +59,7 @@ hw_t to_hw(ngen::HW hw) {
         case ngen::HW::XeHPC: return hw_t::xehpc;
         case ngen::HW::Xe2: return hw_t::xehpc;
         case ngen::HW::Xe3: return hw_t::xehpc;
+        case ngen::HW::Xe3p: return hw_t::xehpc;
         default: gpu_error_not_expected() << "Unknown HW: " << to_string(hw);
     }
     return hw_t::undef;

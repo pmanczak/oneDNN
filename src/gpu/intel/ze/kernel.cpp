@@ -174,18 +174,13 @@ status_t kernel_t::parallel_for(impl::stream_t &stream,
     ze_group_count_t group_count = {global_size[0] / group_size[0],
             global_size[1] / group_size[1], global_size[2] / group_size[2]};
 
-    std::vector<ze_event_handle_t> ze_deps
-            = utils::downcast<const xpu::ze::event_t *>(&deps)->ze_events_;
-    std::vector<ze_event_handle_t> ze_out_deps
-            = utils::downcast<xpu::ze::event_t *>(&out_dep)->ze_events_;
-
+    const auto &ze_deps = xpu::ze::event_t::from(deps);
     ze_event_handle_t out_event = ze_stream->create_event();
 
     CHECK(xpu::ze::zeCommandListAppendLaunchKernel(ze_stream->list(), kernel_,
-            &group_count, out_event, static_cast<uint32_t>(ze_deps.size()),
-            ze_deps.data()));
+            &group_count, out_event, ze_deps.size(), ze_deps.data()));
 
-    if (out_event) ze_out_deps.push_back(out_event);
+    if (out_event) xpu::ze::event_t::from(out_dep).append(out_event);
     if (stream.is_profiling_enabled()) {
         ze_stream->profiler().register_event(
                 utils::make_unique<xpu::ze::event_t>(out_event));
@@ -194,8 +189,18 @@ status_t kernel_t::parallel_for(impl::stream_t &stream,
     return status::success;
 }
 
+status_t kernel_t::get_binary(
+        const impl::engine_t *engine, xpu::binary_t &binary) const {
+    return ze::get_module_binary(*module_, binary);
+}
+
 status_t kernel_t::get_kernel_binary(xpu::binary_t &binary) const {
     return ze::get_kernel_binary(kernel_, binary);
+}
+
+status_t kernel_t::get_binary_size(
+        const impl::engine_t *engine, size_t *binary_size) const {
+    return ze::get_binary_size(*module_, binary_size);
 }
 
 status_t kernel_t::dump() const {

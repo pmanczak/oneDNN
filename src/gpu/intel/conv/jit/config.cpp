@@ -490,7 +490,6 @@ std::string maybe_fixup_1st_conv_wei_tag(
         const config_t &cfg, const std::string &tag) {
     auto &prb = cfg.prb();
 
-    if (!cfg.is_dp_fma()) return tag;
     if (!is_small_ic(prb) || prb.is_dw) return tag;
     if (prb.ab_swap_transpose) return tag;
     if (!prb.is_fwd) return tag;
@@ -1094,6 +1093,9 @@ status_t init_vec_size(config_t &cfg) {
 
 int default_regs(const config_t &cfg) {
     if (!cfg.hw().large_grf_support()) return 128;
+    if (cfg.hw().family() == ngen::ProductFamily::CRI
+            && cfg.is_dpas_or_dpasw_fma())
+        return 512;
     if (cfg.is_dpas_or_dpasw_fma()) return 256;
     return 128;
 }
@@ -1483,6 +1485,42 @@ walk_order_t maybe_fixup_group_with_small_channels(
     return fixed;
 }
 
+// Adjusts walk order when weights do not fit L3 cache for non-1x1 forward
+// convolution. For such cases move `oh` to the innermost grid position to
+// increase kh-related data reuse in activations.
+walk_order_t maybe_fixup_large_weights(
+        const config_t &cfg, const walk_order_t &walk_order) {
+    // Apply the heuristic only for smaller L3 cache sizes.
+    const size_t l3_size = cfg.hw().l3_cache_size();
+    if (l3_size > (1 << 22)) return walk_order;
+
+    auto &prb = cfg.prb();
+    // No reuse for when kh is one.
+    if (prb.kh == 1 || !prb.is_fwd) return walk_order;
+    // Blocked walk order implies that it's already cache-aware.
+    for (int id = 0; id < 3; id++) {
+        if (walk_order.is_blocked(id)) return walk_order;
+    }
+
+    auto full_tile = cfg.shape(/*pad=*/false);
+    size_t wei_bytes = get_memory_footprint(
+            prb.ab_swap_transpose ? tensor_kind_t::a : tensor_kind_t::b, cfg,
+            full_tile);
+    if (wei_bytes < l3_size) return walk_order;
+
+    auto grid_tile = get_grid_tile(cfg);
+    // Apply the heuristic - move `oh` to be fast-changing in the grid.
+    walk_order_t fixed;
+    if (grid_tile.has(pvars::oh))
+        fixed.add(pvars::oh, grid_tile.get(pvars::oh), 0);
+    for (auto &b : walk_order.blocks()) {
+        if (b.dim == pvars::oh) continue;
+        fixed.add(b.dim, b.size, b.grid_id);
+    }
+    fixed.finalize(grid_tile);
+    return fixed;
+}
+
 walk_order_t get_default_walk_order(
         const config_t &cfg, const tile_t &grid_tile) {
     using vec_t = std::vector<pvar_t>;
@@ -1512,6 +1550,7 @@ walk_order_t get_default_walk_order(
     }
     walk_order.finalize(grid_tile);
     walk_order = maybe_fixup_group_with_small_channels(cfg, walk_order);
+    walk_order = maybe_fixup_large_weights(cfg, walk_order);
     return walk_order;
 }
 

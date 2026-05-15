@@ -66,8 +66,8 @@ static void adjust_lws_calc_kernel(lookup_table::params_t &conf,
     auto eus_per_ss = intel_engine->device_info()->max_eus_per_wg();
     const int max_ss = div_up(eu_count, eus_per_ss);
 
-    auto gpu_arch = intel_engine->device_info()->gpu_arch();
-    const int max_slm_size = compute::device_info_t::max_slm_size(gpu_arch);
+    const int max_slm_size = compute::device_info_t::max_slm_size(
+            intel_engine->device_info()->gpu_product());
     auto generated_nd = dispatch.nd_range();
     const compute::range_t &base_gws = generated_nd.global_range();
     const compute::range_t &base_lws = generated_nd.local_range();
@@ -400,6 +400,7 @@ status_t xe_fwd_t::pd_t::init_conf(impl::engine_t *engine) {
 
 status_t xe_fwd_t::pd_t::init_kernel_ctx(
         compute::kernel_ctx_t &kernel_ctx) const {
+    kernel_ctx.register_buffer_size(*src_md());
     return init_kernel_ctx_common(kernel_ctx, conf, dispatch_calc_stat,
             dispatch_reduce_stat, dispatch, dispatch_reduce_aux, off);
 }
@@ -602,6 +603,7 @@ status_t xe_bwd_t::pd_t::init_conf(impl::engine_t *engine) {
 
 status_t xe_bwd_t::pd_t::init_kernel_ctx(
         compute::kernel_ctx_t &kernel_ctx) const {
+    kernel_ctx.register_buffer_size(*diff_src_md());
     return init_kernel_ctx_common(kernel_ctx, conf, dispatch_calc_stat,
             dispatch_reduce_stat, dispatch, dispatch_reduce_aux, off);
 }

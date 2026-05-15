@@ -52,8 +52,8 @@ void Generator<hw>::kLoop(KLoop type, const GEMMProblem &problem, GEMMStrategy &
     auto Ta_load = state.Ta_load, Tb_load = state.Tb_load;
 
     bool cLoadAhead = strategy.cLoadAhead;
-    auto opCountMain = outerProductCount(hw, problem, strategy);
-    auto minOPCount = minOuterProductCount(hw, problem, strategy);
+    auto opCountMain = outerProductCount(problem, strategy);
+    auto minOPCount = minOuterProductCount(problem, strategy);
     auto opCountRem = minOPCount;
 
     auto A_copies = strategy.A_copies;
@@ -1570,11 +1570,11 @@ void Generator<hw>::kLoop(KLoop type, const GEMMProblem &problem, GEMMStrategy &
 
     // Sync any tokens nGEN thinks might still be outstanding, except for DPAS.
     // nGEN cannot always discover that these tokens are no longer alive.
-    bool isC[GRF::maxRegs()] = {};
+    bool isC[GRF::maxRegs(hw)] = {};
     for (const auto &C_regs: state.C_regs)
         for (int r = 0; r < C_regs.getLen(); r++)
             isC[C_regs[r].getBase()] = true;
-    for (int i = 0; i < GRF::maxRegs(); i++)
+    for (int i = 0; i < GRF::maxRegs(hw); i++)
         if (!isC[i])
             wrdep(GRF(i));
 }
@@ -1759,7 +1759,7 @@ void Generator<hw>::gemmAiBiRemLoadInc(int h, bool incremental, bool incremental
     auto kSLMPMod = kSLMCountUp ? ge : gt;
 
     bool prezero = !willRemask && ((doA ? state.slmASums : state.slmBSums)
-                                       || (minOuterProductCount(hw, problem, strategy) > 1));
+                                       || (minOuterProductCount(problem, strategy) > 1));
 
     if (!incremental) {
         if (prezero) zeroMatrix(Xi_regs, strategy);
@@ -2061,7 +2061,7 @@ void Generator<hw>::kLoopActivateSLMRemainder(bool active, bool preactivate, con
     auto &effKMasksBi = shareKMasksAiBi ? state.kMasksAi : state.kMasksBi;
     auto &initSLMKOffset = state.initSLMKOffset;
 
-    auto minOPCount = minOuterProductCount(hw, problem, strategy);
+    auto minOPCount = minOuterProductCount(problem, strategy);
 
     // Calculate or recalculate SLM k remainders as needed.
     if (active && !preactivate && kSLMStorage.isInvalid()) {

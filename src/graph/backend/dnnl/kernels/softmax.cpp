@@ -49,6 +49,7 @@ status_t softmax_fwd_t::compile_impl(const dnnl_partition_impl_t *part,
     pass_pipeline_t pipeline(vis);
 
     BACKEND_DNNL_ADD_PASS(pipeline, lower_down);
+    BACKEND_DNNL_ADD_PASS(pipeline, decompose_softmax_with_stats);
     BACKEND_DNNL_ADD_PASS(pipeline, fuse_post_typecast_to_predecessor);
     BACKEND_DNNL_ADD_PASS(pipeline, remove_quant_data_with_no_effect);
     BACKEND_DNNL_ADD_PASS(pipeline, replace_quant_data_with_binary_post_op);
@@ -495,7 +496,7 @@ status_t softmax_bwd_t::ocl_execute_impl(const stream_t *g_stream,
     for (size_t i = 0; i < subgraph_->execs_.size(); i++) {
         returned_event = subgraph_->execs_[i]->execute_ocl(
                 p_stream, res->get_exec_args()[i], deps);
-        deps = {returned_event};
+        deps.assign(1, returned_event);
     }
 
     scratchpad.set_deps(returned_event);
