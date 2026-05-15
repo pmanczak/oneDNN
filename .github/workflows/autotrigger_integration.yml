@@ -15,9 +15,9 @@ name: "OV integration trigger"
 on:
   # Run once review passed
   pull_request_review:
-    types:
-      - submitted
-
+    types: [submitted]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   # Manual run on specified PR
   #  probably only useful for testing
   workflow_dispatch:
