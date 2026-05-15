@@ -1,5 +1,7 @@
 # Examples and Tutorials {#dev_guide_examples}
 
+(irrelevant)
+
 This page provides an overview of oneDNN examples organized by functionality and use case.
 
 ## Functional API Examples
