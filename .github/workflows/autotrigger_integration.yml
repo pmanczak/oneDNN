@@ -169,8 +169,7 @@ jobs:
             OV Integration trigger bot here.
             Triggering build-only OV integration pipeline. Check results.
             make test_ov
-            disable IGPU
-            disable DGPU
+            enable build_only
         run: |
           echo "PR modifies relevant files, meets trigger conditions, and has no relevant OV integration trigger comments."
           gh pr comment "${{ steps.context.outputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --body "$TRIGGER_PHRASE"
