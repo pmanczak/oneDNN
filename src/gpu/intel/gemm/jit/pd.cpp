@@ -300,8 +300,10 @@ status_t pd_t::init_attrs(impl::engine_t *engine) {
     const auto &set_a_groups = [&set_if_consistent](quant_params &quant,
                                        const quant_entry_t &entry) -> status_t {
         if (entry.has_default_groups()) return status::success;
-        CHECK(set_if_consistent(quant.group_k, entry.get_group(0), DNNL_ARG_A));
-        CHECK(set_if_consistent(quant.group_m, entry.get_group(1), DNNL_ARG_A));
+        CHECK(set_if_consistent(
+                quant.group_k, into<int>(entry.get_group(0)), DNNL_ARG_A));
+        CHECK(set_if_consistent(
+                quant.group_m, into<int>(entry.get_group(1)), DNNL_ARG_A));
         return status::success;
     };
     CHECK(set_a_groups(a_quant, a_zps));
@@ -316,8 +318,10 @@ status_t pd_t::init_attrs(impl::engine_t *engine) {
     const auto &set_b_groups = [&set_if_consistent](quant_params &quant,
                                        const quant_entry_t &entry) -> status_t {
         if (entry.has_default_groups()) return status::success;
-        CHECK(set_if_consistent(quant.group_n, entry.get_group(0), DNNL_ARG_B));
-        CHECK(set_if_consistent(quant.group_k, entry.get_group(1), DNNL_ARG_B));
+        CHECK(set_if_consistent(
+                quant.group_n, into<int>(entry.get_group(0)), DNNL_ARG_B));
+        CHECK(set_if_consistent(
+                quant.group_k, into<int>(entry.get_group(1)), DNNL_ARG_B));
         return status::success;
     };
     CHECK(set_b_groups(b_quant, b_zps));
@@ -327,8 +331,8 @@ status_t pd_t::init_attrs(impl::engine_t *engine) {
     c_quant.scales_type = c_scales.get_data_type();
     c_quant.zp_type = c_zps.get_data_type();
     if (!c_scales.has_default_groups()) {
-        c_quant.group_m = c_scales.get_group(1);
-        c_quant.group_n = c_scales.get_group(0);
+        c_quant.group_m = into<int>(c_scales.get_group(1));
+        c_quant.group_n = into<int>(c_scales.get_group(0));
         with_mx_scale_ = c_scales.is_mx();
     }
     c_quant.zp_host_scalar = c_zp_host_scalar();
@@ -602,7 +606,8 @@ status_t pd_t::init_GEMMProblem(
     align_b = nstl::max(align_b, (int)types::data_type_size(b_type));
     auto b_size = (trans_b ? k : n) * ldb * types::data_type_size(b_type);
 
-    bool int_acc = utils::one_of(a_type, data_type::s8, data_type::u8);
+    bool int_acc = utils::one_of(a_type, data_type::s8, data_type::u8)
+            || (types::is_integral_dt(a_type) && types::is_integral_dt(b_type));
     int_acc &= !(a_grouped() || b_grouped());
     auto c_type = desc()->c_type();
     auto align_c
@@ -737,8 +742,8 @@ status_t pd_t::init_GEMMProblem(
 
     if (problem.Ta.isInteger()) problem.Ts = Type::f32;
 
-    if (alpha() == 1.0f) problem.alpha = alpha();
-    if (beta() == 0.0f || beta() == 1.0f) problem.beta = beta();
+    if (alpha() == 1.0f) problem.alpha = (int)alpha();
+    if (beta() == 0.0f || beta() == 1.0f) problem.beta = (int)beta();
 
     gpu_post_ops_t gpu_post_ops;
     CHECK(gpu_post_ops_t::make(

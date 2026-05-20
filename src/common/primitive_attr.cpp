@@ -237,8 +237,7 @@ status_t post_ops_t::validate_binary(alg_kind_t alg,
     bool is_ternary_op = (alg == binary_select);
 
     VCHECK_ATTR(alg_ok, VERBOSE_BAD_ALGORITHM);
-    VCHECK_ATTR(memory_desc_sanity_check(*user_src1_desc),
-            VERBOSE_MEM_DESC_CHECK_FAIL);
+    CHECK(memory_desc_sanity_check(*user_src1_desc));
 
     // Additional check to restrict run-time dimension usage until supported.
     for (int d = 0; d < user_src1_desc->ndims; ++d) {
@@ -248,8 +247,7 @@ status_t post_ops_t::validate_binary(alg_kind_t alg,
 
     // Additional checks if the algorithm involves ternary inputs
     if (is_ternary_op) {
-        VCHECK_ATTR(memory_desc_sanity_check(*user_src2_desc),
-                VERBOSE_MEM_DESC_CHECK_FAIL);
+        CHECK(memory_desc_sanity_check(*user_src2_desc));
         for (int d = 0; d < user_src2_desc->ndims; ++d) {
             VCHECK_ATTR(!is_runtime_value(user_src2_desc->dims[d]),
                     VERBOSE_RUNTIMEDIM_UNSUPPORTED);
@@ -646,8 +644,10 @@ status_t dnnl_primitive_attr_set_scales_v3(primitive_attr_t *attr, int arg,
                         quantization_mode::dynamic_mx,
                         quantization_mode::dynamic_fp),
             VERBOSE_BAD_PARAM, "qmode");
-    VCHECK_ATTR(
-            utils::one_of(data_type, f32, bf16, f16, e8m0, f8_e5m2, f8_e4m3),
+    VCHECK_ATTR(utils::one_of(data_type, f32, bf16, f16, e8m0, f8_e4m3),
+            VERBOSE_INVALID_DATATYPE, "scales");
+    // A single low-precision scale is not expected as they work per group.
+    VCHECK_ATTR(IMPLICATION(utils::one_of(data_type, e8m0, f8_e4m3), mask > 0),
             VERBOSE_INVALID_DATATYPE, "scales");
     VCHECK_ATTR(
             IMPLICATION(group_ndims, validate_dims(group_ndims, group_dims)),
