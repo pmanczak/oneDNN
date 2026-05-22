@@ -14,13 +14,6 @@ on:
     types: [submitted]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Manual run on specified PR
-  #  probably only useful for testing
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'Run OV integration build on this PR'
-        required: true
 
 permissions:
   pull-requests: write
@@ -30,7 +23,6 @@ permissions:
 jobs:
   check-and-run:
     if: |
-      github.event_name == 'workflow_dispatch' ||
       (
         github.event_name == 'pull_request_review' &&
         github.event.pull_request.draft == false &&
@@ -157,7 +149,6 @@ jobs:
 
       - name: Add a comment to trigger integration tests
         if: |
-          github.event_name == 'workflow_dispatch' || 
           (
             steps.file_filter.outputs.relevant_files == 'true' &&
             steps.trigger_freshness.outputs.skip == 'false' &&
