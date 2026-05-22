@@ -108,7 +108,7 @@ jobs:
             relevant_files:
               - 'src/gpu/**'
 
-      - name: Check if trigger comment is newer than last PR change
+      - name: Last PR change needs to be newer than trigger comment.
         if: steps.check_approval.outputs.skip == 'false'
         id: trigger_freshness
         env:
@@ -116,7 +116,7 @@ jobs:
           PR_NUMBER: ${{ steps.context.outputs.pr_number }}
           TRIGGER_PHRASE: "make test_ov"
         run: |
-          LAST_COMMENT_AT=$(
+          LAST_TRIGGER_COMMENT_AT=$(
             gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
             | jq -r --arg phrase "$TRIGGER_PHRASE" '
                 [
@@ -141,13 +141,13 @@ jobs:
               '
           )
 
-          echo "last_comment_at=$LAST_COMMENT_AT" >> "$GITHUB_OUTPUT"
+          echo "last_comment_at=$LAST_TRIGGER_COMMENT_AT" >> "$GITHUB_OUTPUT"
           echo "last_commit_at=$LAST_COMMIT_AT" >> "$GITHUB_OUTPUT"
 
-          echo "Latest trigger comment: $LAST_COMMENT_AT"
+          echo "Latest trigger comment: $LAST_TRIGGER_COMMENT_AT"
           echo "Latest PR commit: $LAST_COMMIT_AT"
 
-          if [ -n "$LAST_COMMENT_AT" ] && [ -n "$LAST_COMMIT_AT" ] && [[ "$LAST_COMMENT_AT" > "$LAST_COMMIT_AT" ]]; then
+          if [ -n "$LAST_TRIGGER_COMMENT_AT" ] && [ -n "$LAST_COMMIT_AT" ] && [[ "$LAST_TRIGGER_COMMENT_AT" > "$LAST_COMMIT_AT" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Trigger comment is newer than the last PR change; skip re-trigger."
           else
